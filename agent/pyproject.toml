@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "igris-agent"
+version = "0.1.0"
+description = "Igris OS AI agent layer (orchestration, planning, memory)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+authors = [{ name = "Igris OS Project" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = []
+
+[project.scripts]
+igris-agent = "igris_agent.__main__:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

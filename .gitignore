@@ -1,0 +1,29 @@
+# Rust
+/target/
+**/*.rs.bk
+# Cargo.lock is intentionally committed for the binary workspace.
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local environment
+.env
+*.local

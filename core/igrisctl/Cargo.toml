@@ -1,0 +1,13 @@
+[package]
+name = "igrisctl"
+description = "Igris command-line client for the core service daemon."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "igrisctl"
+path = "src/main.rs"
+
+[dependencies]

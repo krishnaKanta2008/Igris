@@ -1,0 +1,13 @@
+[package]
+name = "igrisd"
+description = "Igris core service daemon (privileged IPC and tool routing boundary)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "igrisd"
+path = "src/main.rs"
+
+[dependencies]
