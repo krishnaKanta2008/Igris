@@ -85,6 +85,22 @@ impl Policy {
         Self { allowed }
     }
 
+    /// The policy in force for Milestone 4.
+    ///
+    /// Filesystem mutation operations are granted only when the daemon has
+    /// explicitly configured at least one writable path. The actual
+    /// path-level allow-list is enforced separately by `igrisd`.
+    pub fn milestone_four(writes_enabled: bool) -> Self {
+        let mut policy = Self::milestone_three();
+
+        if writes_enabled {
+            policy.allow(igris_proto::OP_FS_WRITE);
+            policy.allow(igris_proto::OP_FS_DELETE);
+        }
+
+        policy
+    }
+
     /// Allow an operation explicitly. Returns `true` if it was newly added.
     pub fn allow(&mut self, op: impl Into<String>) -> bool {
         self.allowed.insert(op.into())
@@ -188,6 +204,39 @@ mod tests {
             policy.evaluate(igris_proto::OP_PROCESS_CHILDREN),
             Decision::Allow
         );
+    }
+
+    #[test]
+    fn milestone_four_keeps_writes_denied_without_configuration() {
+        let policy = Policy::milestone_four(false);
+
+        assert_eq!(policy.evaluate(igris_proto::OP_FS_WRITE), Decision::Deny);
+        assert_eq!(policy.evaluate(igris_proto::OP_FS_DELETE), Decision::Deny);
+        assert_eq!(
+            policy.evaluate(igris_proto::OP_PROCESS_LIST),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn milestone_four_allows_writes_when_explicitly_enabled() {
+        let policy = Policy::milestone_four(true);
+
+        assert_eq!(policy.evaluate(igris_proto::OP_FS_WRITE), Decision::Allow);
+        assert_eq!(policy.evaluate(igris_proto::OP_FS_DELETE), Decision::Allow);
+        assert_eq!(
+            policy.evaluate(igris_proto::OP_SYSTEM_INFO),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn milestone_four_does_not_grant_unrelated_operations() {
+        let policy = Policy::milestone_four(true);
+
+        assert_eq!(policy.evaluate("process.kill"), Decision::Deny);
+        assert_eq!(policy.evaluate("system.exec"), Decision::Deny);
+        assert_eq!(policy.evaluate("events.subscribe"), Decision::Deny);
     }
 
     #[test]

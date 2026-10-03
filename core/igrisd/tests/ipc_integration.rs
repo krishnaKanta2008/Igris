@@ -28,6 +28,10 @@ struct TestDaemon {
 
 impl TestDaemon {
     fn start(policy: Policy) -> Self {
+        Self::start_with_writable_paths(policy, &[])
+    }
+
+    fn start_with_writable_paths(policy: Policy, writable_paths: &[&str]) -> Self {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -53,7 +57,22 @@ impl TestDaemon {
                 .expect("escape symlink");
         }
 
-        let config = Config::with_fs_root(&socket_path, &audit_path, &fs_root);
+        // Writable paths supplied as relative paths under fs_root.
+        let writable_paths: Vec<std::path::PathBuf> = writable_paths
+            .iter()
+            .map(|relative| {
+                let path = fs_root.join(relative);
+                std::fs::create_dir_all(&path).expect("create writable directory");
+                path
+            })
+            .collect();
+
+        let config = if writable_paths.is_empty() {
+            Config::with_fs_root(&socket_path, &audit_path, &fs_root)
+        } else {
+            Config::with_writable_paths(&socket_path, &audit_path, &fs_root, writable_paths)
+        };
+
         let server = Arc::new(Server::bind(&config, policy).expect("bind test server"));
 
         let runner = server.clone();
@@ -569,7 +588,7 @@ fn process_stat_succeeds_for_a_known_live_process() {
     assert!(response.ok, "expected success, got {response:?}");
     let result = response.result.expect("result present");
     assert_eq!(result["pid"].as_u64(), Some(pid as u64));
-    assert!(result["name"].as_str().unwrap_or("").len() > 0);
+    assert!(!result["name"].as_str().unwrap_or("").is_empty());
     assert!(result["ppid"].as_u64().unwrap_or(0) >= 1);
 
     let audit = daemon.audit_lines();
@@ -660,4 +679,307 @@ fn deny_all_policy_denies_process_tools() {
     assert_eq!(audit.len(), 1);
     assert_eq!(audit[0]["decision"], "deny");
     assert_eq!(audit[0]["result"], "denied");
+}
+
+#[test]
+fn fs_write_succeeds() {
+    let daemon = TestDaemon::start_with_writable_paths(Policy::milestone_four(true), &["writable"]);
+    let target = daemon.fs_path("writable/created.txt");
+    let response = daemon.fs_call(
+        "fs.write",
+        "fs-write-ok",
+        serde_json::json!({
+            "path": target,
+            "content_base64": "aGVsbG8=",
+            "confirm": true
+        }),
+    );
+
+    assert!(response.ok, "expected success, got {response:?}");
+    let result = response.result.expect("result present");
+    assert_eq!(result["size_bytes"], 5);
+    assert_eq!(result["overwritten"], false);
+    assert_eq!(std::fs::read(&target).expect("read back"), b"hello");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["operation"], "fs.write");
+    assert_eq!(audit[0]["decision"], "allow");
+    assert_eq!(audit[0]["result"], "success");
+    let audit_raw = std::fs::read_to_string(&daemon.audit_path).unwrap_or_default();
+    assert!(!audit_raw.contains("aGVsbG8="), "audit must not log base64");
+    assert!(!audit_raw.contains("hello"), "audit must not log contents");
+}
+
+#[test]
+fn fs_write_overwrites_existing_file() {
+    let daemon = TestDaemon::start_with_writable_paths(Policy::milestone_four(true), &["writable"]);
+    let target = daemon.fs_path("writable/existing.txt");
+    std::fs::write(&target, b"old").expect("seed");
+    let response = daemon.fs_call(
+        "fs.write",
+        "fs-write-over",
+        serde_json::json!({
+            "path": target,
+            "content_base64": "bmV3",
+            "confirm": true
+        }),
+    );
+
+    assert!(response.ok, "expected success, got {response:?}");
+    let result = response.result.expect("result present");
+    assert_eq!(result["overwritten"], true);
+    assert_eq!(std::fs::read(&target).expect("read back"), b"new");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit[0]["result"], "success");
+}
+
+#[test]
+fn fs_write_denied_with_empty_writable_allow_list() {
+    let daemon = TestDaemon::start(Policy::milestone_four(true));
+    let target = daemon.fs_path("hello.txt");
+    let original = std::fs::read(&target).expect("seed");
+    let response = daemon.fs_call(
+        "fs.write",
+        "fs-write-nowrites",
+        serde_json::json!({
+            "path": target,
+            "content_base64": "aGVsbG8=",
+            "confirm": true
+        }),
+    );
+
+    assert!(!response.ok);
+    assert_eq!(std::fs::read(&target).expect("unchanged"), original);
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "error");
+}
+
+#[test]
+fn fs_write_missing_confirmation_is_rejected() {
+    let daemon = TestDaemon::start_with_writable_paths(Policy::milestone_four(true), &["writable"]);
+    let target = daemon.fs_path("writable/confirm.txt");
+    let response = daemon.fs_call(
+        "fs.write",
+        "fs-write-noconfirm",
+        serde_json::json!({
+            "path": target,
+            "content_base64": "aGVsbG8="
+        }),
+    );
+
+    assert!(!response.ok);
+    assert_eq!(response.error.expect("error").code, "BAD_REQUEST");
+    assert!(!std::path::Path::new(&target).exists());
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "error");
+}
+
+#[test]
+fn fs_write_outside_writable_allow_list_is_rejected() {
+    let daemon = TestDaemon::start_with_writable_paths(Policy::milestone_four(true), &["writable"]);
+    let target = daemon.fs_path("blocked.txt");
+    let response = daemon.fs_call(
+        "fs.write",
+        "fs-write-blocked",
+        serde_json::json!({
+            "path": target,
+            "content_base64": "aGVsbG8=",
+            "confirm": true
+        }),
+    );
+
+    assert!(!response.ok);
+    assert!(!std::path::Path::new(&target).exists());
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+}
+
+#[test]
+fn fs_write_malformed_base64_is_rejected() {
+    let daemon = TestDaemon::start_with_writable_paths(Policy::milestone_four(true), &["writable"]);
+    let target = daemon.fs_path("writable/bad-base64.txt");
+    let response = daemon.fs_call(
+        "fs.write",
+        "fs-write-badb64",
+        serde_json::json!({
+            "path": target,
+            "content_base64": "not-base64!",
+            "confirm": true
+        }),
+    );
+
+    assert!(!response.ok);
+    assert_eq!(response.error.expect("error").code, "BAD_REQUEST");
+    assert!(!std::path::Path::new(&target).exists());
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+}
+
+#[test]
+fn fs_write_exceeding_max_bytes_is_rejected() {
+    let daemon = TestDaemon::start_with_writable_paths(Policy::milestone_four(true), &["writable"]);
+    let target = daemon.fs_path("writable/too-large.txt");
+    let response = daemon.fs_call(
+        "fs.write",
+        "fs-write-toobig",
+        serde_json::json!({
+            "path": target,
+            "content_base64": "aGVsbG8=",
+            "max_bytes": 4,
+            "confirm": true
+        }),
+    );
+
+    assert!(!response.ok);
+    assert_eq!(response.error.expect("error").code, "BAD_REQUEST");
+    assert!(!std::path::Path::new(&target).exists());
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+}
+
+#[test]
+fn fs_delete_succeeds_for_regular_file() {
+    let daemon = TestDaemon::start_with_writable_paths(Policy::milestone_four(true), &["writable"]);
+    let target = daemon.fs_path("writable/delete-me.txt");
+    std::fs::write(&target, b"bye").expect("seed");
+    let response = daemon.fs_call(
+        "fs.delete",
+        "fs-delete-ok",
+        serde_json::json!({"path": target, "confirm": true}),
+    );
+
+    assert!(response.ok, "expected success, got {response:?}");
+    let result = response.result.expect("result present");
+    assert_eq!(result["deleted"], true);
+    assert!(!std::path::Path::new(&target).exists());
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["operation"], "fs.delete");
+    assert_eq!(audit[0]["decision"], "allow");
+    assert_eq!(audit[0]["result"], "success");
+}
+
+#[test]
+fn fs_delete_denied_with_empty_writable_allow_list() {
+    let daemon = TestDaemon::start(Policy::milestone_four(true));
+    let target = daemon.fs_path("subdir/victim.txt");
+    std::fs::write(&target, b"keep").expect("seed");
+    let response = daemon.fs_call(
+        "fs.delete",
+        "fs-del-noallow",
+        serde_json::json!({"path": target, "confirm": true}),
+    );
+
+    assert!(!response.ok);
+    assert!(std::path::Path::new(&target).exists());
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "error");
+}
+
+#[test]
+fn fs_delete_missing_confirmation_is_rejected() {
+    let daemon = TestDaemon::start_with_writable_paths(Policy::milestone_four(true), &["writable"]);
+    let target = daemon.fs_path("writable/confirm-delete.txt");
+    std::fs::write(&target, b"keep").expect("seed");
+    let response = daemon.fs_call(
+        "fs.delete",
+        "fs-del-noconfirm",
+        serde_json::json!({"path": target}),
+    );
+
+    assert!(!response.ok);
+    assert_eq!(response.error.expect("error").code, "BAD_REQUEST");
+    assert!(std::path::Path::new(&target).exists());
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+}
+
+#[test]
+fn fs_delete_directory_is_rejected() {
+    let daemon = TestDaemon::start_with_writable_paths(Policy::milestone_four(true), &["writable"]);
+    let target = daemon.fs_path("writable/subdir");
+    std::fs::create_dir(&target).expect("mkdir");
+    let response = daemon.fs_call(
+        "fs.delete",
+        "fs-del-dir",
+        serde_json::json!({"path": target, "confirm": true}),
+    );
+
+    assert!(!response.ok);
+    assert!(std::path::Path::new(&target).is_dir());
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["result"], "error");
+}
+
+#[test]
+#[cfg(unix)]
+fn fs_delete_symlink_removes_link_not_target() {
+    let daemon = TestDaemon::start_with_writable_paths(Policy::milestone_four(true), &["writable"]);
+    let target = daemon.fs_path("writable/real.txt");
+    let link = daemon.fs_path("writable/link.txt");
+    std::fs::write(&target, b"keep").expect("seed");
+    std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+    let response = daemon.fs_call(
+        "fs.delete",
+        "fs-del-link",
+        serde_json::json!({"path": link, "confirm": true}),
+    );
+
+    assert!(response.ok, "expected success, got {response:?}");
+    assert!(!std::path::Path::new(&link).exists());
+    assert_eq!(std::fs::read(&target).expect("target kept"), b"keep");
+}
+
+#[test]
+#[cfg(unix)]
+fn escaping_symlink_is_rejected_and_target_untouched() {
+    let daemon = TestDaemon::start_with_writable_paths(Policy::milestone_four(true), &["writable"]);
+    let link = daemon.fs_path("writable/escape.txt");
+    std::os::unix::fs::symlink("/etc/hostname", &link).expect("symlink");
+
+    let write_response = daemon.fs_call(
+        "fs.write",
+        "fs-esc-write",
+        serde_json::json!({
+            "path": link,
+            "content_base64": "aGVsbG8=",
+            "confirm": true
+        }),
+    );
+    assert!(!write_response.ok);
+
+    let delete_response = daemon.fs_call(
+        "fs.delete",
+        "fs-esc-del",
+        serde_json::json!({"path": link, "confirm": true}),
+    );
+    assert!(!delete_response.ok);
+
+    assert!(std::path::Path::new("/etc/hostname").exists());
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 2);
+    assert!(audit
+        .iter()
+        .all(|a| a["decision"] == "deny" && a["result"] == "error"));
 }

@@ -40,6 +40,12 @@ pub const OP_FS_STAT: &str = "fs.stat";
 /// Operation name for reading file contents.
 pub const OP_FS_READ: &str = "fs.read";
 
+/// Operation name for writing file contents.
+pub const OP_FS_WRITE: &str = "fs.write";
+
+/// Operation name for deleting a file or symlink.
+pub const OP_FS_DELETE: &str = "fs.delete";
+
 /// Operation name for listing processes.
 pub const OP_PROCESS_LIST: &str = "process.list";
 
@@ -55,6 +61,8 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     OP_FS_LIST,
     OP_FS_STAT,
     OP_FS_READ,
+    OP_FS_WRITE,
+    OP_FS_DELETE,
     OP_PROCESS_LIST,
     OP_PROCESS_STAT,
     OP_PROCESS_CHILDREN,
@@ -80,6 +88,12 @@ pub const FS_DEFAULT_MAX_BYTES: usize = 64 * 1024;
 
 /// Hard maximum bytes accepted for `fs.read` (1 MiB).
 pub const FS_MAX_BYTES: usize = 1024 * 1024;
+
+/// Default maximum bytes accepted by `fs.write` (64 KiB).
+pub const FS_WRITE_DEFAULT_MAX_BYTES: usize = 64 * 1024;
+
+/// Hard maximum bytes accepted by `fs.write` (1 MiB).
+pub const FS_WRITE_MAX_BYTES: usize = 1024 * 1024;
 
 /// Well-known error codes returned in error responses.
 pub mod error_code {
@@ -185,6 +199,16 @@ pub fn validate_operation_params(
             validate_path_param(params)?;
             validate_limit_param(params, "max_bytes", FS_MAX_BYTES)
         }
+        OP_FS_WRITE => {
+            validate_path_param(params)?;
+            validate_content_base64_param(params)?;
+            validate_limit_param(params, "max_bytes", FS_WRITE_MAX_BYTES)?;
+            validate_confirmation_param(params)
+        }
+        OP_FS_DELETE => {
+            validate_path_param(params)?;
+            validate_confirmation_param(params)
+        }
         OP_PROCESS_LIST => validate_limit_param(params, "max", PROCESS_MAX),
         OP_PROCESS_STAT => validate_pid_param(params),
         OP_PROCESS_CHILDREN => {
@@ -194,6 +218,41 @@ pub fn validate_operation_params(
         other => Err(ProtocolError::new(
             error_code::UNKNOWN_OPERATION,
             format!("unknown operation {other:?}"),
+        )),
+    }
+}
+
+/// Require a base64-encoded string for `fs.write`.
+fn validate_content_base64_param(params: &serde_json::Value) -> Result<(), ProtocolError> {
+    let content = params.get("content_base64").ok_or_else(|| {
+        ProtocolError::new(error_code::BAD_REQUEST, "missing required `content_base64`")
+    })?;
+
+    if !content.is_string() {
+        return Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            "`content_base64` must be a string",
+        ));
+    }
+
+    Ok(())
+}
+
+/// Require explicit protocol-level confirmation for dangerous filesystem operations.
+fn validate_confirmation_param(params: &serde_json::Value) -> Result<(), ProtocolError> {
+    let confirm = params
+        .get("confirm")
+        .ok_or_else(|| ProtocolError::new(error_code::BAD_REQUEST, "missing required `confirm`"))?;
+
+    match confirm.as_bool() {
+        Some(true) => Ok(()),
+        Some(false) => Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            "`confirm` must be true",
+        )),
+        None => Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            "`confirm` must be a boolean",
         )),
     }
 }
@@ -540,6 +599,23 @@ mod tests {
             &serde_json::json!({"path": "/tmp", "max_bytes": 1024})
         )
         .is_ok());
+        assert!(validate_operation_params(
+            OP_FS_WRITE,
+            &serde_json::json!({
+                "path": "/tmp/file",
+                "content_base64": "aGVsbG8=",
+                "confirm": true
+            })
+        )
+        .is_ok());
+        assert!(validate_operation_params(
+            OP_FS_DELETE,
+            &serde_json::json!({
+                "path": "/tmp/file",
+                "confirm": true
+            })
+        )
+        .is_ok());
         assert!(validate_operation_params(OP_SYSTEM_INFO, &serde_json::json!({})).is_ok());
     }
 
@@ -548,7 +624,9 @@ mod tests {
         assert!(SUPPORTED_OPERATIONS.contains(&OP_FS_LIST));
         assert!(SUPPORTED_OPERATIONS.contains(&OP_FS_STAT));
         assert!(SUPPORTED_OPERATIONS.contains(&OP_FS_READ));
-        assert!(!SUPPORTED_OPERATIONS.contains(&"fs.write"));
+        assert!(SUPPORTED_OPERATIONS.contains(&OP_FS_WRITE));
+        assert!(SUPPORTED_OPERATIONS.contains(&OP_FS_DELETE));
+        assert!(!SUPPORTED_OPERATIONS.contains(&"fs.unknown"));
     }
 
     #[test]
@@ -617,6 +695,155 @@ mod tests {
             .code,
             error_code::BAD_REQUEST
         );
+    }
+
+    #[test]
+    fn operation_params_reject_malformed_write_requests() {
+        let base = serde_json::json!({
+            "path": "/tmp/file",
+            "content_base64": "aGVsbG8=",
+            "confirm": true
+        });
+
+        let mut missing_path = base.clone();
+        missing_path.as_object_mut().unwrap().remove("path");
+        assert_eq!(
+            validate_operation_params(OP_FS_WRITE, &missing_path)
+                .expect_err("missing path")
+                .code,
+            error_code::BAD_REQUEST
+        );
+
+        let mut missing_content = base.clone();
+        missing_content
+            .as_object_mut()
+            .unwrap()
+            .remove("content_base64");
+        assert_eq!(
+            validate_operation_params(OP_FS_WRITE, &missing_content)
+                .expect_err("missing content")
+                .code,
+            error_code::BAD_REQUEST
+        );
+
+        let wrong_content = serde_json::json!({
+            "path": "/tmp/file",
+            "content_base64": 123,
+            "confirm": true
+        });
+        assert_eq!(
+            validate_operation_params(OP_FS_WRITE, &wrong_content)
+                .expect_err("wrong content type")
+                .code,
+            error_code::BAD_REQUEST
+        );
+
+        let missing_confirm = serde_json::json!({
+            "path": "/tmp/file",
+            "content_base64": "aGVsbG8="
+        });
+        assert_eq!(
+            validate_operation_params(OP_FS_WRITE, &missing_confirm)
+                .expect_err("missing confirmation")
+                .code,
+            error_code::BAD_REQUEST
+        );
+
+        let false_confirm = serde_json::json!({
+            "path": "/tmp/file",
+            "content_base64": "aGVsbG8=",
+            "confirm": false
+        });
+        assert_eq!(
+            validate_operation_params(OP_FS_WRITE, &false_confirm)
+                .expect_err("false confirmation")
+                .code,
+            error_code::BAD_REQUEST
+        );
+
+        let wrong_confirm = serde_json::json!({
+            "path": "/tmp/file",
+            "content_base64": "aGVsbG8=",
+            "confirm": "yes"
+        });
+        assert_eq!(
+            validate_operation_params(OP_FS_WRITE, &wrong_confirm)
+                .expect_err("wrong confirmation type")
+                .code,
+            error_code::BAD_REQUEST
+        );
+
+        let too_large = serde_json::json!({
+            "path": "/tmp/file",
+            "content_base64": "aGVsbG8=",
+            "max_bytes": FS_WRITE_MAX_BYTES + 1,
+            "confirm": true
+        });
+        assert_eq!(
+            validate_operation_params(OP_FS_WRITE, &too_large)
+                .expect_err("too large")
+                .code,
+            error_code::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn operation_params_reject_malformed_delete_requests() {
+        let missing_confirm = serde_json::json!({
+            "path": "/tmp/file"
+        });
+        assert_eq!(
+            validate_operation_params(OP_FS_DELETE, &missing_confirm)
+                .expect_err("missing confirmation")
+                .code,
+            error_code::BAD_REQUEST
+        );
+
+        let false_confirm = serde_json::json!({
+            "path": "/tmp/file",
+            "confirm": false
+        });
+        assert_eq!(
+            validate_operation_params(OP_FS_DELETE, &false_confirm)
+                .expect_err("false confirmation")
+                .code,
+            error_code::BAD_REQUEST
+        );
+
+        let wrong_confirm = serde_json::json!({
+            "path": "/tmp/file",
+            "confirm": 1
+        });
+        assert_eq!(
+            validate_operation_params(OP_FS_DELETE, &wrong_confirm)
+                .expect_err("wrong confirmation type")
+                .code,
+            error_code::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn operation_params_accept_write_default_limit() {
+        assert!(validate_operation_params(
+            OP_FS_WRITE,
+            &serde_json::json!({
+                "path": "/tmp/file",
+                "content_base64": "aGVsbG8=",
+                "confirm": true
+            })
+        )
+        .is_ok());
+
+        assert!(validate_operation_params(
+            OP_FS_WRITE,
+            &serde_json::json!({
+                "path": "/tmp/file",
+                "content_base64": "aGVsbG8=",
+                "max_bytes": FS_WRITE_DEFAULT_MAX_BYTES,
+                "confirm": true
+            })
+        )
+        .is_ok());
     }
 
     #[test]

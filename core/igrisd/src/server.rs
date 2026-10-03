@@ -45,8 +45,10 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 struct Shared {
     policy: Arc<Policy>,
     audit: Arc<Mutex<AuditLog>>,
-    /// Canonical filesystem root for the read-only tools.
+    /// Canonical filesystem root for filesystem tools.
     fs_root: PathBuf,
+    /// Canonical paths explicitly permitted for filesystem writes/deletes.
+    writable_paths: Vec<PathBuf>,
 }
 
 /// The daemon listener and its shared state.
@@ -82,6 +84,32 @@ impl Server {
         std::fs::create_dir_all(&config.fs_root)?;
         let fs_root = config.fs_root.canonicalize()?;
 
+        let mut writable_paths = Vec::with_capacity(config.writable_paths.len());
+
+        for path in &config.writable_paths {
+            let canonical = path.canonicalize()?;
+
+            if !canonical.starts_with(&fs_root) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "configured writable path escapes filesystem root",
+                ));
+            }
+
+            writable_paths.push(canonical);
+        }
+
+        // Writable paths must be existing directories; otherwise they cannot
+        // serve as a writable subtree root.
+        for canonical in &writable_paths {
+            if !canonical.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "configured writable path is not a directory",
+                ));
+            }
+        }
+
         Ok(Self {
             listener,
             socket_path: config.socket_path.clone(),
@@ -89,6 +117,7 @@ impl Server {
                 policy: Arc::new(policy),
                 audit: Arc::new(Mutex::new(audit)),
                 fs_root,
+                writable_paths,
             },
             running: Arc::new(AtomicBool::new(true)),
         })
@@ -256,7 +285,12 @@ fn handle_payload(bytes: &[u8], shared: &Shared, peer: &Option<String>) -> Respo
         );
     }
 
-    match dispatch(&request.op, &request.params, &shared.fs_root) {
+    match dispatch(
+        &request.op,
+        &request.params,
+        &shared.fs_root,
+        &shared.writable_paths,
+    ) {
         Ok(result) => {
             record(
                 shared,
@@ -291,6 +325,7 @@ fn dispatch(
     op: &str,
     params: &serde_json::Value,
     fs_root: &Path,
+    writable_paths: &[PathBuf],
 ) -> Result<serde_json::Value, DispatchFailure> {
     match op {
         igris_proto::OP_SYSTEM_INFO => {
@@ -326,6 +361,24 @@ fn dispatch(
             serde_json::to_value(result).map_err(|_| DispatchFailure {
                 code: error_code::INTERNAL,
                 message: "failed to encode fs.read result",
+                denied: false,
+            })
+        }
+        igris_proto::OP_FS_WRITE => {
+            let result =
+                fs::write(fs_root, writable_paths, params).map_err(DispatchFailure::from)?;
+            serde_json::to_value(result).map_err(|_| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: "failed to encode fs.write result",
+                denied: false,
+            })
+        }
+        igris_proto::OP_FS_DELETE => {
+            let result =
+                fs::delete(fs_root, writable_paths, params).map_err(DispatchFailure::from)?;
+            serde_json::to_value(result).map_err(|_| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: "failed to encode fs.delete result",
                 denied: false,
             })
         }
@@ -424,11 +477,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn writable_paths_must_remain_inside_fs_root() {
+        let root = std::env::temp_dir().join(format!("igris-server-test-{}", std::process::id()));
+
+        let writable = root.join("writable");
+        std::fs::create_dir_all(&writable).expect("create test directories");
+
+        let config = Config::with_writable_paths(
+            root.join("igrisd.sock"),
+            root.join("audit.log"),
+            &root,
+            [&writable],
+        );
+
+        let server = Server::bind(&config, Policy::milestone_three())
+            .expect("valid writable path should be accepted");
+
+        assert_eq!(server.shared.writable_paths.len(), 1);
+        assert_eq!(
+            server.shared.writable_paths[0],
+            writable.canonicalize().unwrap()
+        );
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn writable_path_outside_fs_root_is_rejected() {
+        let root =
+            std::env::temp_dir().join(format!("igris-server-test-outside-{}", std::process::id()));
+
+        let fs_root = root.join("root");
+        let outside = root.join("outside");
+
+        std::fs::create_dir_all(&fs_root).expect("create fs root");
+        std::fs::create_dir_all(&outside).expect("create outside directory");
+
+        let config = Config::with_writable_paths(
+            root.join("igrisd.sock"),
+            root.join("audit.log"),
+            &fs_root,
+            [&outside],
+        );
+
+        let result = Server::bind(&config, Policy::milestone_three());
+
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn dispatch_returns_system_info() {
         let value = dispatch(
             igris_proto::OP_SYSTEM_INFO,
             &serde_json::json!({}),
             Path::new("/"),
+            &[],
         )
         .expect("system.info dispatches");
         assert!(value.get("hostname").is_some());
@@ -437,6 +543,6 @@ mod tests {
 
     #[test]
     fn dispatch_rejects_unknown_operation() {
-        assert!(dispatch("fs.write", &serde_json::json!({}), Path::new("/")).is_err());
+        assert!(dispatch("fs.write", &serde_json::json!({}), Path::new("/"), &[],).is_err());
     }
 }
