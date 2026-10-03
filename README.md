@@ -5,9 +5,10 @@ kernel is the foundation; the project builds a progressively integrated AI
 system layer on top of it, connected through structured tools and APIs and
 governed by a least-privilege permission model.
 
-> **Status: Phase 0 (project foundation).** No system functionality is
-> implemented yet. This repository currently contains only scaffolding,
-> documentation, and build configuration.
+> **Status: Milestone 1 (trusted core) implemented.** The `igrisd` daemon,
+> `igrisctl` client, default-deny permission engine, and the live `system.info`
+> tool are functional over a versioned Unix-socket protocol with append-only
+> audit logging. The AI agent layer remains a Phase 0 scaffold.
 
 ## Canonical repository location
 
@@ -69,7 +70,7 @@ WSL2 is a **development environment**, not the final Igris OS runtime. The
 long-term goal is an installable Igris OS environment eventually delivered via
 a VM, bootable image, or suitable hardware.
 
-## Build and test (Phase 0 scaffold)
+## Build and test
 
 ```bash
 # Rust workspace
@@ -84,9 +85,25 @@ pip install -e ./agent
 python -m unittest discover -s agent/tests
 ```
 
+## Milestone 1 quick start
+
+```bash
+# Terminal 1: start the daemon (user-owned socket, no root)
+./target/debug/igrisd
+
+# Terminal 2: query it
+./target/debug/igrisctl system.info
+./target/debug/igrisctl system.info --json
+```
+
+Socket and audit paths default to the shared locations documented in
+`docs/architecture/ipc-protocol.md` and can be overridden with
+`IGRIS_SOCKET_PATH` and `IGRIS_AUDIT_LOG`.
+
 ## Documentation
 
 - Architecture: `docs/architecture/overview.md`
+- IPC protocol: `docs/architecture/ipc-protocol.md`
 - Roadmap: `docs/roadmap.md`
 - Decision records: `docs/adr/`
 

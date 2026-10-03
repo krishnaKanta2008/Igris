@@ -1,7 +1,34 @@
-//! Igris core service daemon (privileged IPC and tool routing boundary).
-//!
-//! Phase 0 scaffold. No functionality is implemented yet.
+//! `igrisd` daemon entry point.
 
-fn main() {
-    println!("igrisd {} (Phase 0 scaffold)", env!("CARGO_PKG_VERSION"));
+use std::process::ExitCode;
+use std::sync::Arc;
+
+use igris_permd::Policy;
+use igrisd::config::Config;
+use igrisd::server::Server;
+
+fn main() -> ExitCode {
+    let config = Config::from_env();
+    let policy = Policy::milestone_one();
+
+    let server = match Server::bind(&config, policy) {
+        Ok(server) => Arc::new(server),
+        Err(e) => {
+            eprintln!("igrisd: failed to start: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    println!(
+        "igrisd {} listening on {}",
+        env!("CARGO_PKG_VERSION"),
+        server.socket_path().display()
+    );
+    println!("igrisd audit log: {}", config.audit_log_path.display());
+
+    if let Err(e) = server.run() {
+        eprintln!("igrisd: server error: {e}");
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
 }

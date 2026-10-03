@@ -9,11 +9,11 @@ protocols are specified in later phases and recorded as ADRs.
 ```
 User
  ↓
-Igris AI Agent                (Python)     [scaffold]
+Igris AI Agent                (Python)     [scaffold, not wired to core]
  ↓
-Permission / Security Layer   (Rust)       [scaffold]
+Permission / Security Layer   (Rust)       [Milestone 1: default-deny engine]
  ↓
-Igris Core Services           (Rust)       [scaffold]
+Igris Core Services           (Rust)       [Milestone 1: Unix-socket IPC daemon]
  ↓
 Linux System Services                       [available, unused]
  ↓
@@ -61,6 +61,9 @@ Phases 0–4.
 
 ## Current status
 
-Phase 0 provides only the repository foundation: build configuration, empty
-component scaffolds, and documentation. No IPC, no policy engine, and no tools
-are implemented yet.
+Phase 0 established the repository foundation. Milestone 1 implements the
+trusted core: `igrisd` serves a versioned, length-framed JSON protocol over a
+user-owned Unix socket (see `docs/architecture/ipc-protocol.md`), `igris-permd`
+applies a default-deny policy, `system.info` reads live kernel/system data from
+`/proc` and `/sys`, and every request produces one append-only audit record.
+The Python agent remains a Phase 0 scaffold and is not yet wired to the core.

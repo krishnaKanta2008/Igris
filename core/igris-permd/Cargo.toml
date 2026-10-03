@@ -1,13 +1,20 @@
 [package]
 name = "igris-permd"
-description = "Igris permission/policy broker (default-deny policy engine)."
+description = "Igris permission/policy broker: default-deny policy engine shared with igrisd."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
+
+[lib]
+name = "igris_permd"
+path = "src/lib.rs"
 
 [[bin]]
 name = "igris-permd"
 path = "src/main.rs"
 
 [dependencies]
+igris-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true

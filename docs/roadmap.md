@@ -3,11 +3,11 @@
 This roadmap is incremental. Each phase is tested before the next begins, and
 working code is not rewritten without reason.
 
-## Phase 0 — Project foundation (current)
+## Phase 0 — Project foundation (complete)
 Repository, build configuration, component scaffolding, documentation, and
 decision records. No functionality.
 
-## Phase 1 — Trusted core
+## Phase 1 — Trusted core (complete, Milestone 1)
 `igrisd` daemon and `igrisctl` client over a versioned Unix-socket protocol; a
 default-deny policy broker; and one real tool (`system.info`) reading live
 kernel/system data from `/proc` and `/sys`. End-to-end tests.

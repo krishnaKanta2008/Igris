@@ -1,0 +1,11 @@
+[package]
+name = "igris-proto"
+description = "Igris IPC protocol: versioned wire types, framing, and shared endpoint conventions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

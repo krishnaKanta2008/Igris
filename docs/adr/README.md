@@ -15,3 +15,4 @@ Format: lightweight [MADR](https://adr.github.io/madr/).
 | [0003](0003-use-python-for-agent-layer.md) | Use Python for the AI agent layer | Accepted |
 | [0004](0004-wsl2-as-development-environment.md) | Use WSL2 Ubuntu 22.04 as the development environment | Accepted |
 | [0005](0005-privilege-separation-and-default-deny.md) | Privilege separation and default-deny policy | Accepted |
+| [0006](0006-unix-socket-ipc-boundary.md) | Unix-socket IPC boundary, versioned bounded protocol, audit | Accepted |

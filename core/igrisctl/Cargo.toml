@@ -6,8 +6,14 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 
+[lib]
+name = "igrisctl"
+path = "src/lib.rs"
+
 [[bin]]
 name = "igrisctl"
 path = "src/main.rs"
 
 [dependencies]
+igris-proto.workspace = true
+serde_json.workspace = true

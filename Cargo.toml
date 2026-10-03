@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "core/igrisd",
+    "core/igris-proto",
     "core/igris-permd",
+    "core/igrisd",
     "core/igrisctl",
 ]
 
@@ -11,3 +12,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.99"
 authors = ["Igris OS Project"]
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+igris-proto = { path = "core/igris-proto" }
+igris-permd = { path = "core/igris-permd" }
