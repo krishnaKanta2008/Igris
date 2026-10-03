@@ -60,6 +60,17 @@ impl Policy {
         Self { allowed }
     }
 
+    /// The policy in force for Milestone 2: allow `system.info` plus the
+    /// read-only filesystem tools.
+    pub fn milestone_two() -> Self {
+        let mut allowed = BTreeSet::new();
+        allowed.insert(igris_proto::OP_SYSTEM_INFO.to_string());
+        allowed.insert(igris_proto::OP_FS_LIST.to_string());
+        allowed.insert(igris_proto::OP_FS_STAT.to_string());
+        allowed.insert(igris_proto::OP_FS_READ.to_string());
+        Self { allowed }
+    }
+
     /// Allow an operation explicitly. Returns `true` if it was newly added.
     pub fn allow(&mut self, op: impl Into<String>) -> bool {
         self.allowed.insert(op.into())
@@ -106,6 +117,39 @@ mod tests {
         );
         assert_eq!(policy.evaluate("proc.list"), Decision::Deny);
         assert_eq!(policy.evaluate("system.exec"), Decision::Deny);
+    }
+
+    #[test]
+    fn milestone_two_allows_system_info_and_fs_tools() {
+        let policy = Policy::milestone_two();
+        assert_eq!(
+            policy.evaluate(igris_proto::OP_SYSTEM_INFO),
+            Decision::Allow
+        );
+        assert_eq!(policy.evaluate(igris_proto::OP_FS_LIST), Decision::Allow);
+        assert_eq!(policy.evaluate(igris_proto::OP_FS_STAT), Decision::Allow);
+        assert_eq!(policy.evaluate(igris_proto::OP_FS_READ), Decision::Allow);
+    }
+
+    #[test]
+    fn milestone_two_denies_unrelated_operations() {
+        let policy = Policy::milestone_two();
+        assert_eq!(policy.evaluate("fs.write"), Decision::Deny);
+        assert_eq!(policy.evaluate("fs.delete"), Decision::Deny);
+        assert_eq!(policy.evaluate("proc.list"), Decision::Deny);
+        assert_eq!(policy.evaluate("system.exec"), Decision::Deny);
+        assert_eq!(policy.evaluate(""), Decision::Deny);
+    }
+
+    #[test]
+    fn milestone_one_behavior_is_unchanged() {
+        let policy = Policy::milestone_one();
+        assert_eq!(
+            policy.evaluate(igris_proto::OP_SYSTEM_INFO),
+            Decision::Allow
+        );
+        assert_eq!(policy.evaluate(igris_proto::OP_FS_READ), Decision::Deny);
+        assert_eq!(policy.evaluate(igris_proto::OP_FS_LIST), Decision::Deny);
     }
 
     #[test]

@@ -5,10 +5,11 @@ kernel is the foundation; the project builds a progressively integrated AI
 system layer on top of it, connected through structured tools and APIs and
 governed by a least-privilege permission model.
 
-> **Status: Milestone 1 (trusted core) implemented.** The `igrisd` daemon,
-> `igrisctl` client, default-deny permission engine, and the live `system.info`
-> tool are functional over a versioned Unix-socket protocol with append-only
-> audit logging. The AI agent layer remains a Phase 0 scaffold.
+> **Status: Milestone 2 implemented.** The `igrisd` daemon, `igrisctl` client,
+> default-deny permission engine, live `system.info`, and read-only filesystem
+> tools (`fs.list`, `fs.stat`, `fs.read`) confined to `IGRIS_FS_ROOT` are
+> functional over a versioned Unix-socket protocol with append-only audit
+> logging. The AI agent layer remains a Phase 0 scaffold.
 
 ## Canonical repository location
 
@@ -94,6 +95,11 @@ python -m unittest discover -s agent/tests
 # Terminal 2: query it
 ./target/debug/igrisctl system.info
 ./target/debug/igrisctl system.info --json
+
+# Read-only filesystem tools (confined to IGRIS_FS_ROOT, default ~/.igris/share)
+./target/debug/igrisctl fs.list --path ~/.igris/share
+./target/debug/igrisctl fs.stat --path ~/.igris/share/some-file
+./target/debug/igrisctl fs.read --path ~/.igris/share/some-file [--max-bytes N]
 ```
 
 Socket and audit paths default to the shared locations documented in

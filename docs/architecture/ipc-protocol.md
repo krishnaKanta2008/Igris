@@ -48,11 +48,12 @@ Each message is:
   value is rejected with `UNSUPPORTED_VERSION`.
 - `id` (string): non-empty, at most 128 bytes, no control characters. The id
   is echoed in the response and recorded in the audit log.
-- `op` (string): one of the supported operations. `system.info` is the only
-  operation in Milestone 1. Unknown operations are rejected with
+- `op` (string): one of the supported operations: `system.info`,
+  `fs.list`, `fs.stat`, `fs.read`. Unknown operations are rejected with
   `UNKNOWN_OPERATION`.
-- `params` (object): must be a JSON object; empty `{}` accepted for
-  `system.info`.
+- `params` (object): must be a JSON object. `system.info` takes no required
+  fields; the `fs.*` operations require their own parameters (below), which
+  are validated per operation (`validate_operation_params`).
 
 ## Response schema
 
@@ -89,7 +90,55 @@ Error:
 | `UNKNOWN_OPERATION` | Operation not in the supported list |
 | `DENIED` | Operation rejected by the default-deny policy |
 | `TOO_LARGE` | Declared frame length exceeds the limit |
+| `NOT_FOUND` | The requested filesystem path does not exist |
+| `FS_ERROR` | Filesystem failure with a sanitized message |
 | `INTERNAL` | Provider failed to execute an allowed operation |
+
+## Filesystem boundary
+
+All `fs.*` operations are confined to a single canonical filesystem root:
+`IGRIS_FS_ROOT`, default `~/.igris/share`. For every request the daemon
+canonicalizes the requested absolute path (following symlinks) and requires
+the resolved target to remain inside the canonical root. Paths that escape —
+via `..`, an outside absolute path, or a symlink — are rejected with
+`BAD_REQUEST` (`path escapes filesystem boundary`) and audited as denied.
+Result payloads and audit records echo the client-requested path; the resolved
+host path is never exposed.
+
+## `fs.list`
+
+Params: `{ "path": string, "max_entries"?: number }` — `max_entries`
+defaults to 256, hard maximum 1024.
+
+```json
+{ "path": "...", "entries": [{ "name": "...", "kind": "file", "size_bytes": 12 }], "truncated": false }
+```
+
+`entries` is sorted by name; `kind` is `directory`/`file`/`symlink`/`other`;
+`size_bytes` may be `null` when unavailable; `truncated` reports that a limit
+cut the listing short.
+
+## `fs.stat`
+
+Params: `{ "path": string }`.
+
+```json
+{ "path": "...", "kind": "file", "size_bytes": 12, "mode": 420, "uid": 1000, "gid": 1000, "modified_unix": 1696000000, "accessed_unix": 1696000000 }
+```
+
+Symlinks are followed; the result describes the final target.
+
+## `fs.read`
+
+Params: `{ "path": string, "max_bytes"?: number }` — `max_bytes` defaults to
+64 KiB, hard maximum 1 MiB. The effective cap also ensures the base64-encoded
+result fits the 1 MiB `MAX_RESPONSE_SIZE` frame limit.
+
+```json
+{ "path": "...", "size_bytes": 12, "encoding": "base64", "data": "...", "truncated": false }
+```
+
+Binary-safe: contents are base64-encoded.
 
 ## `system.info` result
 
@@ -116,8 +165,8 @@ cannot be turned into a generic file-read primitive.
 1. Frame + size check (oversized rejected before body read).
 2. JSON parse.
 3. Protocol validation (version, id, params, supported operation).
-4. Permission decision via `igris_permd::Policy` (default deny; Milestone 1
-   allows exactly `system.info`).
+4. Permission decision via `igris_permd::Policy` (default deny; Milestone 2
+   allows `system.info`, `fs.list`, `fs.stat`, `fs.read`).
 5. Provider dispatch.
 6. Exactly one append-only audit record per request: timestamp, request id,
    operation, decision (`allow`/`deny`), coarse result

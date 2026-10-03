@@ -31,6 +31,7 @@ use igris_proto::{
 
 use crate::audit::{now_rfc3339, AuditLog, AuditRecord, AuditResult};
 use crate::config::Config;
+use crate::providers::fs;
 use crate::providers::system_info;
 
 /// Idle timeout for a single connection.
@@ -43,6 +44,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 struct Shared {
     policy: Arc<Policy>,
     audit: Arc<Mutex<AuditLog>>,
+    /// Canonical filesystem root for the read-only tools.
+    fs_root: PathBuf,
 }
 
 /// The daemon listener and its shared state.
@@ -73,12 +76,18 @@ impl Server {
         std::fs::set_permissions(&config.socket_path, std::fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
 
+        // Ensure the filesystem root exists and is stored in canonical form
+        // so containment checks cannot be confused by symlinks or `..`.
+        std::fs::create_dir_all(&config.fs_root)?;
+        let fs_root = config.fs_root.canonicalize()?;
+
         Ok(Self {
             listener,
             socket_path: config.socket_path.clone(),
             shared: Shared {
                 policy: Arc::new(policy),
                 audit: Arc::new(Mutex::new(audit)),
+                fs_root,
             },
             running: Arc::new(AtomicBool::new(true)),
         })
@@ -217,6 +226,18 @@ fn handle_payload(bytes: &[u8], shared: &Shared, peer: &Option<String>) -> Respo
         return Response::error(id_for_error, e.code, e.message);
     }
 
+    if let Err(e) = igris_proto::validate_operation_params(&request.op, &request.params) {
+        record(
+            shared,
+            peer,
+            id_for_error.clone(),
+            Some(request.op.clone()),
+            Decision::Deny,
+            AuditResult::Error,
+        );
+        return Response::error(id_for_error, e.code, e.message);
+    }
+
     let decision = shared.policy.evaluate(&request.op);
     if decision == Decision::Deny {
         record(
@@ -234,7 +255,7 @@ fn handle_payload(bytes: &[u8], shared: &Shared, peer: &Option<String>) -> Respo
         );
     }
 
-    match dispatch(&request.op, &request.params) {
+    match dispatch(&request.op, &request.params, &shared.fs_root) {
         Ok(result) => {
             record(
                 shared,
@@ -246,29 +267,99 @@ fn handle_payload(bytes: &[u8], shared: &Shared, peer: &Option<String>) -> Respo
             );
             Response::success(request.id.clone(), result)
         }
-        Err(message) => {
+        Err(failure) => {
             record(
                 shared,
                 peer,
                 Some(request.id.clone()),
                 Some(request.op.clone()),
-                Decision::Allow,
+                if failure.denied {
+                    Decision::Deny
+                } else {
+                    Decision::Allow
+                },
                 AuditResult::Error,
             );
-            Response::error(Some(request.id.clone()), error_code::INTERNAL, message)
+            Response::error(Some(request.id.clone()), failure.code, failure.message)
         }
     }
 }
 
 /// Route an allowed operation to its provider.
-fn dispatch(op: &str, _params: &serde_json::Value) -> Result<serde_json::Value, String> {
+fn dispatch(
+    op: &str,
+    params: &serde_json::Value,
+    fs_root: &Path,
+) -> Result<serde_json::Value, DispatchFailure> {
     match op {
         igris_proto::OP_SYSTEM_INFO => {
-            let info = system_info::collect().map_err(|e| e.to_string())?;
-            serde_json::to_value(info).map_err(|e| e.to_string())
+            let info = system_info::collect().map_err(|e| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: sanitize_internal(&e.to_string()),
+                denied: false,
+            })?;
+            serde_json::to_value(info).map_err(|_| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: "failed to encode system information",
+                denied: false,
+            })
         }
-        other => Err(format!("unsupported operation {other:?}")),
+        igris_proto::OP_FS_LIST => {
+            let result = fs::list(fs_root, params).map_err(DispatchFailure::from)?;
+            serde_json::to_value(result).map_err(|_| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: "failed to encode fs.list result",
+                denied: false,
+            })
+        }
+        igris_proto::OP_FS_STAT => {
+            let result = fs::stat(fs_root, params).map_err(DispatchFailure::from)?;
+            serde_json::to_value(result).map_err(|_| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: "failed to encode fs.stat result",
+                denied: false,
+            })
+        }
+        igris_proto::OP_FS_READ => {
+            let result = fs::read(fs_root, params).map_err(DispatchFailure::from)?;
+            serde_json::to_value(result).map_err(|_| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: "failed to encode fs.read result",
+                denied: false,
+            })
+        }
+        _other => Err(DispatchFailure {
+            code: error_code::UNKNOWN_OPERATION,
+            message: "unsupported operation",
+            denied: true,
+        }),
     }
+}
+
+/// Provider/dispatch error mapped to a protocol error body and audit decision.
+#[derive(Debug)]
+struct DispatchFailure {
+    code: &'static str,
+    message: &'static str,
+    /// `true` when the request itself was rejected (audit `deny`).
+    denied: bool,
+}
+
+impl From<fs::FsFailure> for DispatchFailure {
+    fn from(f: fs::FsFailure) -> Self {
+        Self {
+            code: f.code,
+            message: f.message,
+            denied: f.denied,
+        }
+    }
+}
+
+/// Provider errors from `system.info` carry OS text; keep it, it is about the
+/// local machine the user already owns, but never include raw paths for fs.
+fn sanitize_internal(message: &str) -> &'static str {
+    let _ = message;
+    "system information unavailable"
 }
 
 /// Append one audit record, ignoring a poisoned lock (logging must not abort).
@@ -299,14 +390,18 @@ mod tests {
 
     #[test]
     fn dispatch_returns_system_info() {
-        let value = dispatch(igris_proto::OP_SYSTEM_INFO, &serde_json::json!({}))
-            .expect("system.info dispatches");
+        let value = dispatch(
+            igris_proto::OP_SYSTEM_INFO,
+            &serde_json::json!({}),
+            Path::new("/"),
+        )
+        .expect("system.info dispatches");
         assert!(value.get("hostname").is_some());
         assert!(value.get("memory").is_some());
     }
 
     #[test]
     fn dispatch_rejects_unknown_operation() {
-        assert!(dispatch("fs.read", &serde_json::json!({})).is_err());
+        assert!(dispatch("fs.write", &serde_json::json!({}), Path::new("/")).is_err());
     }
 }

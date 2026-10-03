@@ -21,6 +21,7 @@ struct TestDaemon {
     socket_path: PathBuf,
     audit_path: PathBuf,
     dir: PathBuf,
+    fs_root: PathBuf,
     server: Arc<Server>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -34,8 +35,25 @@ impl TestDaemon {
         let dir = std::env::temp_dir().join(format!("igrisd-it-{}-{unique}", std::process::id()));
         let socket_path = dir.join("igrisd.sock");
         let audit_path = dir.join("audit.log");
+        let fs_root = dir.join("root");
+        std::fs::create_dir_all(&fs_root).expect("create fs root");
 
-        let config = Config::new(&socket_path, &audit_path);
+        // Populate the filesystem root with fixture data.
+        std::fs::write(fs_root.join("hello.txt"), b"hello igris").expect("write fixture");
+        std::fs::create_dir(fs_root.join("subdir")).expect("mkdir fixture");
+        std::fs::write(fs_root.join("big.bin"), vec![b'z'; 4096]).expect("write fixture");
+        for i in 0..20 {
+            std::fs::write(fs_root.join(format!("entry{i:02}.txt")), b"x").expect("write fixture");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(fs_root.join("hello.txt"), fs_root.join("inner-link.txt"))
+                .expect("inner symlink");
+            std::os::unix::fs::symlink("/etc/hostname", fs_root.join("escape-link.txt"))
+                .expect("escape symlink");
+        }
+
+        let config = Config::with_fs_root(&socket_path, &audit_path, &fs_root);
         let server = Arc::new(Server::bind(&config, policy).expect("bind test server"));
 
         let runner = server.clone();
@@ -55,9 +73,25 @@ impl TestDaemon {
             socket_path,
             audit_path,
             dir,
+            fs_root,
             server,
             handle: Some(handle),
         }
+    }
+
+    /// Call an fs operation with the given params JSON fragment.
+    fn fs_call(&self, op: &str, id: &str, params: serde_json::Value) -> Response {
+        let payload = serde_json::json!({
+            "version": 1,
+            "id": id,
+            "op": op,
+            "params": params,
+        });
+        self.raw_exchange(payload.to_string().as_bytes())
+    }
+
+    fn fs_path(&self, rel: &str) -> String {
+        self.fs_root.join(rel).to_string_lossy().into_owned()
     }
 
     /// Connect and send raw bytes (already framed or not).
@@ -104,6 +138,10 @@ impl Drop for TestDaemon {
 
 fn milestone_one() -> Policy {
     Policy::milestone_one()
+}
+
+fn milestone_two() -> Policy {
+    Policy::milestone_two()
 }
 
 #[test]
@@ -244,4 +282,227 @@ fn multiple_requests_on_one_connection() {
     }
 
     assert_eq!(daemon.audit_lines().len(), 2);
+}
+
+#[test]
+fn fs_list_succeeds() {
+    let daemon = TestDaemon::start(milestone_two());
+    let response = daemon.fs_call(
+        "fs.list",
+        "fs-list-1",
+        serde_json::json!({"path": daemon.fs_root.to_string_lossy()}),
+    );
+
+    assert!(response.ok, "expected success, got {response:?}");
+    let result = response.result.expect("result present");
+    assert!(result.get("entries").is_some());
+    assert_eq!(result["truncated"], false);
+    let entries = result["entries"].as_array().expect("entries array");
+    assert!(entries.iter().any(|e| e["name"] == "hello.txt"));
+    assert!(entries
+        .iter()
+        .any(|e| e["name"] == "subdir" && e["kind"] == "directory"));
+    // The resolved host path must not leak into the payload.
+    assert!(result.get("resolved").is_none());
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["operation"], "fs.list");
+    assert_eq!(audit[0]["decision"], "allow");
+    assert_eq!(audit[0]["result"], "success");
+}
+
+#[test]
+fn fs_stat_succeeds() {
+    let daemon = TestDaemon::start(milestone_two());
+    let response = daemon.fs_call(
+        "fs.stat",
+        "fs-stat-1",
+        serde_json::json!({"path": daemon.fs_path("hello.txt")}),
+    );
+
+    assert!(response.ok, "expected success, got {response:?}");
+    let result = response.result.expect("result present");
+    assert_eq!(result["kind"], "file");
+    assert_eq!(result["size_bytes"], 11);
+    assert!(result["mode"].as_u64().unwrap_or(0) > 0);
+    assert!(result.get("uid").is_some());
+    assert!(result["path"].as_str().unwrap_or("").ends_with("hello.txt"));
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["operation"], "fs.stat");
+    assert_eq!(audit[0]["decision"], "allow");
+    assert_eq!(audit[0]["result"], "success");
+}
+
+#[test]
+fn fs_read_succeeds() {
+    let daemon = TestDaemon::start(milestone_two());
+    let response = daemon.fs_call(
+        "fs.read",
+        "fs-read-1",
+        serde_json::json!({"path": daemon.fs_path("hello.txt")}),
+    );
+
+    assert!(response.ok, "expected success, got {response:?}");
+    let result = response.result.expect("result present");
+    assert_eq!(result["encoding"], "base64");
+    assert_eq!(result["size_bytes"], 11);
+    assert_eq!(result["truncated"], false);
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["operation"], "fs.read");
+    assert_eq!(audit[0]["decision"], "allow");
+    assert_eq!(audit[0]["result"], "success");
+    // Audit must not contain file contents.
+    assert!(!audit[0].to_string().contains("hello igris"));
+}
+
+#[test]
+fn fs_read_truncates_correctly() {
+    let daemon = TestDaemon::start(milestone_two());
+    let response = daemon.fs_call(
+        "fs.read",
+        "fs-read-trunc",
+        serde_json::json!({"path": daemon.fs_path("big.bin"), "max_bytes": 100}),
+    );
+
+    assert!(response.ok);
+    let result = response.result.expect("result present");
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["size_bytes"], 100);
+}
+
+#[test]
+fn fs_list_truncates_correctly() {
+    let daemon = TestDaemon::start(milestone_two());
+    let response = daemon.fs_call(
+        "fs.list",
+        "fs-list-trunc",
+        serde_json::json!({"path": daemon.fs_root.to_string_lossy(), "max_entries": 5}),
+    );
+
+    assert!(response.ok);
+    let result = response.result.expect("result present");
+    assert_eq!(result["truncated"], true);
+    assert_eq!(result["entries"].as_array().expect("entries").len(), 5);
+}
+
+#[test]
+fn traversal_outside_root_is_denied() {
+    let daemon = TestDaemon::start(milestone_two());
+    let escape = format!("{}/../..", daemon.fs_root.display());
+    let response = daemon.fs_call("fs.stat", "fs-trav", serde_json::json!({"path": escape}));
+
+    assert!(!response.ok);
+    assert_eq!(response.error.expect("error").code, "BAD_REQUEST");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "error");
+    assert!(!audit[0]
+        .to_string()
+        .contains(daemon.fs_root.to_str().unwrap_or("")));
+}
+
+#[test]
+fn outside_root_absolute_path_is_denied() {
+    let daemon = TestDaemon::start(milestone_two());
+    let response = daemon.fs_call(
+        "fs.read",
+        "fs-outside",
+        serde_json::json!({"path": "/etc/hostname"}),
+    );
+
+    assert!(!response.ok);
+    assert_eq!(response.error.expect("error").code, "BAD_REQUEST");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "error");
+}
+
+#[test]
+fn escaping_symlink_is_denied() {
+    let daemon = TestDaemon::start(milestone_two());
+    let response = daemon.fs_call(
+        "fs.read",
+        "fs-symlink",
+        serde_json::json!({"path": daemon.fs_path("escape-link.txt")}),
+    );
+
+    assert!(!response.ok);
+    assert_eq!(response.error.expect("error").code, "BAD_REQUEST");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+}
+
+#[test]
+fn inner_symlink_is_allowed() {
+    let daemon = TestDaemon::start(milestone_two());
+    let response = daemon.fs_call(
+        "fs.read",
+        "fs-inner-symlink",
+        serde_json::json!({"path": daemon.fs_path("inner-link.txt")}),
+    );
+    assert!(response.ok, "inner symlink should resolve: {response:?}");
+}
+
+#[test]
+fn malformed_fs_params_return_bad_request() {
+    let daemon = TestDaemon::start(milestone_two());
+
+    let missing = daemon.fs_call("fs.list", "fs-bad-1", serde_json::json!({}));
+    assert_eq!(missing.error.expect("error").code, "BAD_REQUEST");
+
+    let wrong_type = daemon.fs_call("fs.read", "fs-bad-2", serde_json::json!({"path": 7}));
+    assert_eq!(wrong_type.error.expect("error").code, "BAD_REQUEST");
+
+    let bad_limit = daemon.fs_call(
+        "fs.list",
+        "fs-bad-3",
+        serde_json::json!({"path": daemon.fs_path("."), "max_entries": 0}),
+    );
+    assert_eq!(bad_limit.error.expect("error").code, "BAD_REQUEST");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 3);
+    assert!(audit
+        .iter()
+        .all(|a| a["decision"] == "deny" && a["result"] == "error"));
+}
+
+#[test]
+fn deny_all_policy_denies_fs_tools() {
+    let daemon = TestDaemon::start(Policy::deny_all());
+    let response = daemon.fs_call(
+        "fs.read",
+        "fs-denied",
+        serde_json::json!({"path": daemon.fs_path("hello.txt")}),
+    );
+    assert!(!response.ok);
+    assert_eq!(response.error.expect("error").code, "DENIED");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "denied");
+}
+
+#[test]
+fn milestone_one_policy_still_denies_fs_tools() {
+    let daemon = TestDaemon::start(milestone_one());
+    let response = daemon.fs_call(
+        "fs.list",
+        "fs-m1",
+        serde_json::json!({"path": daemon.fs_path(".")}),
+    );
+    assert!(!response.ok);
+    assert_eq!(response.error.expect("error").code, "DENIED");
 }

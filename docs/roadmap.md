@@ -13,9 +13,11 @@ default-deny policy broker; and one real tool (`system.info`) reading live
 kernel/system data from `/proc` and `/sys`. End-to-end tests.
 
 ## Phase 2 — Filesystem tools
-`fs.read`, then `fs.write` and `fs.delete` as separate privilege-separated
-providers, with path allow-lists, a dangerous-operation confirmation flow, and
-an append-only audit log.
+Milestone 2 (complete): read-only `fs.list`, `fs.stat`, `fs.read` confined to a
+canonical `IGRIS_FS_ROOT` boundary with symlink containment, bounded output,
+sanitized errors, and audit. Remaining: `fs.write`/`fs.delete` as separate
+privilege-separated providers with path allow-lists, a dangerous-operation
+confirmation flow, and append-only audit logging.
 
 ## Phase 3 — Process and event monitoring
 `proc.list`, `proc.inspect`, guarded `proc.signal`, and an event provider using

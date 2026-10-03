@@ -31,8 +31,29 @@ pub const LENGTH_PREFIX_SIZE: usize = 4;
 /// Operation name for system information.
 pub const OP_SYSTEM_INFO: &str = "system.info";
 
+/// Operation name for listing a directory.
+pub const OP_FS_LIST: &str = "fs.list";
+
+/// Operation name for reading file metadata.
+pub const OP_FS_STAT: &str = "fs.stat";
+
+/// Operation name for reading file contents.
+pub const OP_FS_READ: &str = "fs.read";
+
 /// Operations supported by this protocol version.
-pub const SUPPORTED_OPERATIONS: &[&str] = &[OP_SYSTEM_INFO];
+pub const SUPPORTED_OPERATIONS: &[&str] = &[OP_SYSTEM_INFO, OP_FS_LIST, OP_FS_STAT, OP_FS_READ];
+
+/// Default maximum entries returned by `fs.list`.
+pub const FS_DEFAULT_MAX_ENTRIES: usize = 256;
+
+/// Hard maximum entries accepted for `fs.list`.
+pub const FS_MAX_ENTRIES: usize = 1024;
+
+/// Default maximum bytes returned by `fs.read` (64 KiB).
+pub const FS_DEFAULT_MAX_BYTES: usize = 64 * 1024;
+
+/// Hard maximum bytes accepted for `fs.read` (1 MiB).
+pub const FS_MAX_BYTES: usize = 1024 * 1024;
 
 /// Well-known error codes returned in error responses.
 pub mod error_code {
@@ -46,6 +67,10 @@ pub mod error_code {
     pub const DENIED: &str = "DENIED";
     /// The framed message exceeded the configured size limit.
     pub const TOO_LARGE: &str = "TOO_LARGE";
+    /// The requested filesystem path does not exist.
+    pub const NOT_FOUND: &str = "NOT_FOUND";
+    /// The filesystem operation failed; the message is sanitized.
+    pub const FS_ERROR: &str = "FS_ERROR";
     /// An internal server error occurred.
     pub const INTERNAL: &str = "INTERNAL";
 }
@@ -108,6 +133,87 @@ pub fn validate_request(req: &Request) -> Result<(), ProtocolError> {
         return Err(ProtocolError::new(
             error_code::UNKNOWN_OPERATION,
             format!("unknown operation {:?}", req.op),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the `params` object for one specific operation.
+///
+/// [`validate_request`] proves the request is structurally sound; this proves
+/// the operation's own arguments are well-formed. Filesystem path safety
+/// (canonicalization and boundary containment) is enforced by the provider,
+/// not here.
+pub fn validate_operation_params(
+    op: &str,
+    params: &serde_json::Value,
+) -> Result<(), ProtocolError> {
+    match op {
+        OP_SYSTEM_INFO => Ok(()),
+        OP_FS_LIST => {
+            validate_path_param(params)?;
+            validate_limit_param(params, "max_entries", FS_MAX_ENTRIES)
+        }
+        OP_FS_STAT => validate_path_param(params),
+        OP_FS_READ => {
+            validate_path_param(params)?;
+            validate_limit_param(params, "max_bytes", FS_MAX_BYTES)
+        }
+        other => Err(ProtocolError::new(
+            error_code::UNKNOWN_OPERATION,
+            format!("unknown operation {other:?}"),
+        )),
+    }
+}
+
+/// Require a `path` string that is absolute and contains no NUL bytes.
+fn validate_path_param(params: &serde_json::Value) -> Result<(), ProtocolError> {
+    let path = params
+        .get("path")
+        .ok_or_else(|| ProtocolError::new(error_code::BAD_REQUEST, "missing required `path`"))?;
+    let path = path
+        .as_str()
+        .ok_or_else(|| ProtocolError::new(error_code::BAD_REQUEST, "`path` must be a string"))?;
+    if path.is_empty() {
+        return Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            "`path` must not be empty",
+        ));
+    }
+    if path.contains('\0') {
+        return Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            "`path` must not contain NUL bytes",
+        ));
+    }
+    if !path.starts_with('/') {
+        return Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            "`path` must be absolute",
+        ));
+    }
+    Ok(())
+}
+
+/// Require an optional positive integer limit within `max`.
+fn validate_limit_param(
+    params: &serde_json::Value,
+    key: &str,
+    max: usize,
+) -> Result<(), ProtocolError> {
+    let Some(value) = params.get(key) else {
+        return Ok(());
+    };
+    let limit = value.as_u64().ok_or_else(|| {
+        ProtocolError::new(
+            error_code::BAD_REQUEST,
+            format!("`{key}` must be a positive integer"),
+        )
+    })?;
+    if limit == 0 || limit as usize > max {
+        return Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            format!("`{key}` must be between 1 and {max}"),
         ));
     }
     Ok(())
@@ -252,6 +358,17 @@ pub fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
 }
 
+/// Default filesystem root for the read-only tools.
+///
+/// `~/.igris/share` for the daemon's current user, falling back to the system
+/// temporary directory when no home directory is known.
+pub fn default_fs_root() -> PathBuf {
+    home_dir()
+        .unwrap_or_else(env::temp_dir)
+        .join(".igris")
+        .join("share")
+}
+
 /// Default daemon socket path.
 ///
 /// Uses `$XDG_RUNTIME_DIR/igris/igrisd.sock` when available, otherwise
@@ -356,6 +473,100 @@ mod tests {
         assert_eq!(
             validate_request(&req).expect_err("unknown op").code,
             error_code::UNKNOWN_OPERATION
+        );
+    }
+
+    #[test]
+    fn operation_params_accept_valid_fs_requests() {
+        assert!(validate_operation_params(
+            OP_FS_LIST,
+            &serde_json::json!({"path": "/tmp", "max_entries": 10})
+        )
+        .is_ok());
+        assert!(
+            validate_operation_params(OP_FS_STAT, &serde_json::json!({"path": "/tmp"})).is_ok()
+        );
+        assert!(validate_operation_params(
+            OP_FS_READ,
+            &serde_json::json!({"path": "/tmp", "max_bytes": 1024})
+        )
+        .is_ok());
+        assert!(validate_operation_params(OP_SYSTEM_INFO, &serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn operation_params_membership_includes_fs_ops() {
+        assert!(SUPPORTED_OPERATIONS.contains(&OP_FS_LIST));
+        assert!(SUPPORTED_OPERATIONS.contains(&OP_FS_STAT));
+        assert!(SUPPORTED_OPERATIONS.contains(&OP_FS_READ));
+        assert!(!SUPPORTED_OPERATIONS.contains(&"fs.write"));
+    }
+
+    #[test]
+    fn operation_params_reject_missing_and_wrong_path() {
+        assert_eq!(
+            validate_operation_params(OP_FS_LIST, &serde_json::json!({}))
+                .expect_err("missing path")
+                .code,
+            error_code::BAD_REQUEST
+        );
+        assert_eq!(
+            validate_operation_params(OP_FS_STAT, &serde_json::json!({"path": 42}))
+                .expect_err("wrong path type")
+                .code,
+            error_code::BAD_REQUEST
+        );
+        assert_eq!(
+            validate_operation_params(OP_FS_READ, &serde_json::json!({"path": "relative/path"}))
+                .expect_err("relative path")
+                .code,
+            error_code::BAD_REQUEST
+        );
+        assert_eq!(
+            validate_operation_params(OP_FS_READ, &serde_json::json!({"path": "/tmp/a\0b"}))
+                .expect_err("NUL path")
+                .code,
+            error_code::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn operation_params_reject_invalid_limits() {
+        assert_eq!(
+            validate_operation_params(
+                OP_FS_LIST,
+                &serde_json::json!({"path": "/x", "max_entries": 0})
+            )
+            .expect_err("zero entries")
+            .code,
+            error_code::BAD_REQUEST
+        );
+        assert_eq!(
+            validate_operation_params(
+                OP_FS_LIST,
+                &serde_json::json!({"path": "/x", "max_entries": FS_MAX_ENTRIES + 1})
+            )
+            .expect_err("too many entries")
+            .code,
+            error_code::BAD_REQUEST
+        );
+        assert_eq!(
+            validate_operation_params(
+                OP_FS_READ,
+                &serde_json::json!({"path": "/x", "max_bytes": "lots"})
+            )
+            .expect_err("string limit")
+            .code,
+            error_code::BAD_REQUEST
+        );
+        assert_eq!(
+            validate_operation_params(
+                OP_FS_READ,
+                &serde_json::json!({"path": "/x", "max_bytes": FS_MAX_BYTES + 1})
+            )
+            .expect_err("too many bytes")
+            .code,
+            error_code::BAD_REQUEST
         );
     }
 

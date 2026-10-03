@@ -13,7 +13,7 @@ Igris AI Agent                (Python)     [scaffold, not wired to core]
  ↓
 Permission / Security Layer   (Rust)       [Milestone 1: default-deny engine]
  ↓
-Igris Core Services           (Rust)       [Milestone 1: Unix-socket IPC daemon]
+Igris Core Services           (Rust)       [Milestones 1-2: IPC daemon, fs tools]
  ↓
 Linux System Services                       [available, unused]
  ↓
@@ -66,4 +66,6 @@ trusted core: `igrisd` serves a versioned, length-framed JSON protocol over a
 user-owned Unix socket (see `docs/architecture/ipc-protocol.md`), `igris-permd`
 applies a default-deny policy, `system.info` reads live kernel/system data from
 `/proc` and `/sys`, and every request produces one append-only audit record.
-The Python agent remains a Phase 0 scaffold and is not yet wired to the core.
+Milestone 2 adds read-only filesystem tools (`fs.list`, `fs.stat`, `fs.read`)
+confined to a canonical `IGRIS_FS_ROOT` boundary (see ADR 0007). The Python
+agent remains a Phase 0 scaffold and is not yet wired to the core.

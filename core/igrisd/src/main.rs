@@ -9,7 +9,7 @@ use igrisd::server::Server;
 
 fn main() -> ExitCode {
     let config = Config::from_env();
-    let policy = Policy::milestone_one();
+    let policy = Policy::milestone_two();
 
     let server = match Server::bind(&config, policy) {
         Ok(server) => Arc::new(server),
@@ -25,6 +25,7 @@ fn main() -> ExitCode {
         server.socket_path().display()
     );
     println!("igrisd audit log: {}", config.audit_log_path.display());
+    println!("igrisd fs root: {}", config.fs_root.display());
 
     if let Err(e) = server.run() {
         eprintln!("igrisd: server error: {e}");

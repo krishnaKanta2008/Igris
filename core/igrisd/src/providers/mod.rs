@@ -7,4 +7,6 @@
 
 pub mod system_info;
 
+pub mod fs;
+
 pub use system_info::{collect, CpuInfo, MemoryInfo, SystemInfo};

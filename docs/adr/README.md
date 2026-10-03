@@ -16,3 +16,4 @@ Format: lightweight [MADR](https://adr.github.io/madr/).
 | [0004](0004-wsl2-as-development-environment.md) | Use WSL2 Ubuntu 22.04 as the development environment | Accepted |
 | [0005](0005-privilege-separation-and-default-deny.md) | Privilege separation and default-deny policy | Accepted |
 | [0006](0006-unix-socket-ipc-boundary.md) | Unix-socket IPC boundary, versioned bounded protocol, audit | Accepted |
+| [0007](0007-filesystem-boundary-and-read-only-tools.md) | Filesystem boundary and read-only filesystem tools | Accepted |

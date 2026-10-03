@@ -2,6 +2,9 @@
 //!
 //! Usage:
 //!   igrisctl system.info [--json]
+//!   igrisctl fs.list --path PATH [--max-entries N] [--json]
+//!   igrisctl fs.stat --path PATH [--json]
+//!   igrisctl fs.read --path PATH [--max-bytes N] [--json]
 //!   igrisctl --version
 //!   igrisctl --help
 
@@ -15,6 +18,9 @@ igrisctl - Igris core service client
 
 USAGE:
     igrisctl system.info [--json]
+    igrisctl fs.list --path PATH [--max-entries N] [--json]
+    igrisctl fs.stat --path PATH [--json]
+    igrisctl fs.read --path PATH [--max-bytes N] [--json]
     igrisctl --version
     igrisctl --help
 
@@ -47,6 +53,7 @@ fn main() -> ExitCode {
             let json = args.iter().any(|a| a == "--json");
             run_system_info(json)
         }
+        op @ ("fs.list" | "fs.stat" | "fs.read") => run_fs(op, &args[1..]),
         other => {
             eprintln!("igrisctl: unknown command {other:?}");
             eprint!("{USAGE}");
@@ -99,6 +106,149 @@ fn run_system_info(json: bool) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+/// Parse `--path`, optional numeric limit, and `--json` from trailing args.
+fn parse_fs_args(args: &[String]) -> Result<(String, Option<u64>, &str, bool), String> {
+    let mut path = None;
+    let mut numeric: Option<u64> = None;
+    let mut numeric_key: Option<&str> = None;
+    let mut json = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json = true,
+            "--path" => {
+                i += 1;
+                path = args.get(i).cloned();
+            }
+            "--max-entries" | "--max-bytes" => {
+                numeric_key = Some(if args[i] == "--max-entries" {
+                    "max_entries"
+                } else {
+                    "max_bytes"
+                });
+                i += 1;
+                numeric = args.get(i).and_then(|v| v.parse::<u64>().ok());
+                if numeric.is_none() {
+                    return Err(format!("{} requires a numeric value", args[i - 1]));
+                }
+            }
+            other => return Err(format!("unknown argument {other:?}")),
+        }
+        i += 1;
+    }
+    let Some(path) = path else {
+        return Err("missing required --path".to_string());
+    };
+    let numeric_key = numeric_key.unwrap_or("");
+    Ok((path, numeric, numeric_key, json))
+}
+
+fn run_fs(op: &str, args: &[String]) -> ExitCode {
+    let (path, numeric, numeric_key, json) = match parse_fs_args(args) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("igrisctl: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let mut params = serde_json::json!({ "path": path });
+    if let Some(value) = numeric {
+        params[numeric_key] = serde_json::json!(value);
+    }
+
+    let socket_path = resolve_socket_path();
+    let request = build_request(op, params);
+    let response = match send(&socket_path, &request) {
+        Ok(response) => response,
+        Err(e) => {
+            eprintln!(
+                "igrisctl: could not reach daemon at {}: {e}",
+                socket_path.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if json {
+        match serde_json::to_string_pretty(&response) {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("igrisctl: failed to render response: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else if response.ok {
+        print_fs_human(op, &response);
+    } else {
+        let code = response
+            .error
+            .as_ref()
+            .map(|e| e.code.as_str())
+            .unwrap_or("UNKNOWN");
+        let message = response
+            .error
+            .as_ref()
+            .map(|e| e.message.as_str())
+            .unwrap_or("no error detail");
+        eprintln!("igrisctl: request failed [{code}]: {message}");
+        return ExitCode::FAILURE;
+    }
+
+    if response.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn print_fs_human(op: &str, response: &igris_proto::Response) {
+    let Some(result) = response.result.as_ref() else {
+        println!("(empty response)");
+        return;
+    };
+    match op {
+        "fs.list" => {
+            println!("path      : {}", field(result, "path"));
+            println!("truncated : {}", field(result, "truncated"));
+            if let Some(entries) = result["entries"].as_array() {
+                for entry in entries {
+                    let name = entry["name"].as_str().unwrap_or("?");
+                    let kind = entry["kind"].as_str().unwrap_or("?");
+                    match entry["size_bytes"].as_u64() {
+                        Some(size) => println!("{kind:<10} {size:>12}  {name}"),
+                        None => println!("{kind:<10} {:>12}  {name}", "-"),
+                    }
+                }
+            }
+        }
+        "fs.stat" => {
+            println!("path     : {}", field(result, "path"));
+            println!("kind     : {}", field(result, "kind"));
+            println!("size     : {} bytes", field(result, "size_bytes"));
+            println!("mode     : {:o}", result["mode"].as_u64().unwrap_or(0));
+            println!(
+                "uid/gid  : {}/{}",
+                field(result, "uid"),
+                field(result, "gid")
+            );
+            println!("modified : {}", field(result, "modified_unix"));
+        }
+        "fs.read" => {
+            println!("path     : {}", field(result, "path"));
+            println!("size     : {} bytes", field(result, "size_bytes"));
+            println!("encoding : {}", field(result, "encoding"));
+            println!("truncated: {}", field(result, "truncated"));
+            let data = field(result, "data");
+            println!("data     : {}...", &data[..data.len().min(64)]);
+        }
+        _ => println!(
+            "{}",
+            serde_json::to_string_pretty(result).unwrap_or_default()
+        ),
     }
 }
 
