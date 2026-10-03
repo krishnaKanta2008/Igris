@@ -67,5 +67,7 @@ user-owned Unix socket (see `docs/architecture/ipc-protocol.md`), `igris-permd`
 applies a default-deny policy, `system.info` reads live kernel/system data from
 `/proc` and `/sys`, and every request produces one append-only audit record.
 Milestone 2 adds read-only filesystem tools (`fs.list`, `fs.stat`, `fs.read`)
-confined to a canonical `IGRIS_FS_ROOT` boundary (see ADR 0007). The Python
-agent remains a Phase 0 scaffold and is not yet wired to the core.
+confined to a canonical `IGRIS_FS_ROOT` boundary (see ADR 0007). Milestone 3
+adds read-only process observation (`process.list`, `process.stat`,
+`process.children`) over `/proc` (see ADR 0008). The Python agent remains a
+Phase 0 scaffold and is not yet wired to the core.

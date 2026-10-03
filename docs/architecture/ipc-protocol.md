@@ -49,7 +49,8 @@ Each message is:
 - `id` (string): non-empty, at most 128 bytes, no control characters. The id
   is echoed in the response and recorded in the audit log.
 - `op` (string): one of the supported operations: `system.info`,
-  `fs.list`, `fs.stat`, `fs.read`. Unknown operations are rejected with
+  `fs.list`, `fs.stat`, `fs.read`, `process.list`, `process.stat`,
+  `process.children`. Unknown operations are rejected with
   `UNKNOWN_OPERATION`.
 - `params` (object): must be a JSON object. `system.info` takes no required
   fields; the `fs.*` operations require their own parameters (below), which
@@ -140,6 +141,41 @@ result fits the 1 MiB `MAX_RESPONSE_SIZE` frame limit.
 
 Binary-safe: contents are base64-encoded.
 
+## Process observation
+
+All `process.*` operations are read-only. Data comes from
+`/proc/<pid>/stat` (pid, comm, state, ppid) and `/proc/<pid>/status`
+(Uid, Gid, VmRSS). Scanning `/proc` is O(number of processes) per request;
+result sizes are bounded. Processes that disappear mid-scan are skipped.
+`name` is the kernel `comm` only; `cmdline`, `environ`, `exe`, `cwd`, `root`,
+fds, cgroups, and wchan are never read or exposed.
+
+`ProcessEntry`:
+
+```json
+{ "pid": 123, "ppid": 456, "name": "igrisd", "state": "S", "uid": 1000, "gid": 1000, "rss_kb": 2048 }
+```
+
+`rss_kb` is `null` when unavailable.
+
+### `process.list`
+
+Params: `{ "max"?: number }` — default 128, hard maximum 512. Result:
+`{ "entries": [ProcessEntry], "truncated": bool }`, sorted by pid.
+
+### `process.stat`
+
+Params: `{ "pid": number }` — integer, `1 <= pid <= 4000000`. Result:
+`ProcessEntry`. A missing/exited process yields `NOT_FOUND`
+(`process not found`).
+
+### `process.children`
+
+Params: `{ "pid": number, "max"?: number }` — same defaults/bounds as
+`process.list`. Result: `{ "parent_pid": number, "entries": [ProcessEntry],
+"truncated": bool }`. Only direct children are returned (entries whose
+ppid equals the requested pid), never recursive descendants.
+
 ## `system.info` result
 
 ```json
@@ -165,8 +201,9 @@ cannot be turned into a generic file-read primitive.
 1. Frame + size check (oversized rejected before body read).
 2. JSON parse.
 3. Protocol validation (version, id, params, supported operation).
-4. Permission decision via `igris_permd::Policy` (default deny; Milestone 2
-   allows `system.info`, `fs.list`, `fs.stat`, `fs.read`).
+4. Permission decision via `igris_permd::Policy` (default deny; Milestone 3
+   allows `system.info`, `fs.list`, `fs.stat`, `fs.read`, `process.list`,
+   `process.stat`, `process.children`).
 5. Provider dispatch.
 6. Exactly one append-only audit record per request: timestamp, request id,
    operation, decision (`allow`/`deny`), coarse result

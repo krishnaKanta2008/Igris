@@ -71,6 +71,20 @@ impl Policy {
         Self { allowed }
     }
 
+    /// The policy in force for Milestone 3: Milestone 2 grants plus the
+    /// read-only process observation operations.
+    pub fn milestone_three() -> Self {
+        let mut allowed = BTreeSet::new();
+        allowed.insert(igris_proto::OP_SYSTEM_INFO.to_string());
+        allowed.insert(igris_proto::OP_FS_LIST.to_string());
+        allowed.insert(igris_proto::OP_FS_STAT.to_string());
+        allowed.insert(igris_proto::OP_FS_READ.to_string());
+        allowed.insert(igris_proto::OP_PROCESS_LIST.to_string());
+        allowed.insert(igris_proto::OP_PROCESS_STAT.to_string());
+        allowed.insert(igris_proto::OP_PROCESS_CHILDREN.to_string());
+        Self { allowed }
+    }
+
     /// Allow an operation explicitly. Returns `true` if it was newly added.
     pub fn allow(&mut self, op: impl Into<String>) -> bool {
         self.allowed.insert(op.into())
@@ -150,6 +164,48 @@ mod tests {
         );
         assert_eq!(policy.evaluate(igris_proto::OP_FS_READ), Decision::Deny);
         assert_eq!(policy.evaluate(igris_proto::OP_FS_LIST), Decision::Deny);
+    }
+
+    #[test]
+    fn milestone_three_allows_process_tools_and_m2_set() {
+        let policy = Policy::milestone_three();
+        assert_eq!(
+            policy.evaluate(igris_proto::OP_SYSTEM_INFO),
+            Decision::Allow
+        );
+        assert_eq!(policy.evaluate(igris_proto::OP_FS_LIST), Decision::Allow);
+        assert_eq!(policy.evaluate(igris_proto::OP_FS_STAT), Decision::Allow);
+        assert_eq!(policy.evaluate(igris_proto::OP_FS_READ), Decision::Allow);
+        assert_eq!(
+            policy.evaluate(igris_proto::OP_PROCESS_LIST),
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.evaluate(igris_proto::OP_PROCESS_STAT),
+            Decision::Allow
+        );
+        assert_eq!(
+            policy.evaluate(igris_proto::OP_PROCESS_CHILDREN),
+            Decision::Allow
+        );
+    }
+
+    #[test]
+    fn milestone_three_denies_unrelated_operations() {
+        let policy = Policy::milestone_three();
+        assert_eq!(policy.evaluate("process.kill"), Decision::Deny);
+        assert_eq!(policy.evaluate("process.exec"), Decision::Deny);
+        assert_eq!(policy.evaluate("fs.write"), Decision::Deny);
+        assert_eq!(policy.evaluate("events.subscribe"), Decision::Deny);
+    }
+
+    #[test]
+    fn earlier_policies_remain_narrow() {
+        let m1 = Policy::milestone_one();
+        assert_eq!(m1.evaluate(igris_proto::OP_PROCESS_LIST), Decision::Deny);
+        let m2 = Policy::milestone_two();
+        assert_eq!(m2.evaluate(igris_proto::OP_PROCESS_LIST), Decision::Deny);
+        assert_eq!(m2.evaluate(igris_proto::OP_PROCESS_STAT), Decision::Deny);
     }
 
     #[test]

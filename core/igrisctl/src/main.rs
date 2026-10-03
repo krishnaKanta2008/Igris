@@ -5,6 +5,9 @@
 //!   igrisctl fs.list --path PATH [--max-entries N] [--json]
 //!   igrisctl fs.stat --path PATH [--json]
 //!   igrisctl fs.read --path PATH [--max-bytes N] [--json]
+//!   igrisctl process.list [--max N] [--json]
+//!   igrisctl process.stat --pid N [--json]
+//!   igrisctl process.children --pid N [--max N] [--json]
 //!   igrisctl --version
 //!   igrisctl --help
 
@@ -21,6 +24,9 @@ USAGE:
     igrisctl fs.list --path PATH [--max-entries N] [--json]
     igrisctl fs.stat --path PATH [--json]
     igrisctl fs.read --path PATH [--max-bytes N] [--json]
+    igrisctl process.list [--max N] [--json]
+    igrisctl process.stat --pid N [--json]
+    igrisctl process.children --pid N [--max N] [--json]
     igrisctl --version
     igrisctl --help
 
@@ -54,6 +60,7 @@ fn main() -> ExitCode {
             run_system_info(json)
         }
         op @ ("fs.list" | "fs.stat" | "fs.read") => run_fs(op, &args[1..]),
+        op @ ("process.list" | "process.stat" | "process.children") => run_process(op, &args[1..]),
         other => {
             eprintln!("igrisctl: unknown command {other:?}");
             eprint!("{USAGE}");
@@ -203,6 +210,149 @@ fn run_fs(op: &str, args: &[String]) -> ExitCode {
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// Parse `--pid`, optional `--max`, and `--json` from trailing args.
+fn parse_process_args(args: &[String]) -> Result<(Option<u64>, Option<u64>, bool), String> {
+    let mut pid = None;
+    let mut max = None;
+    let mut json = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json = true,
+            "--pid" => {
+                i += 1;
+                pid = args.get(i).and_then(|v| v.parse::<u64>().ok());
+                if pid.is_none() {
+                    return Err("--pid requires a numeric value".to_string());
+                }
+            }
+            "--max" => {
+                i += 1;
+                max = args.get(i).and_then(|v| v.parse::<u64>().ok());
+                if max.is_none() {
+                    return Err("--max requires a numeric value".to_string());
+                }
+            }
+            other => return Err(format!("unknown argument {other:?}")),
+        }
+        i += 1;
+    }
+    Ok((pid, max, json))
+}
+
+fn run_process(op: &str, args: &[String]) -> ExitCode {
+    let (pid, max, json) = match parse_process_args(args) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            eprintln!("igrisctl: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let mut params = serde_json::json!({});
+    match op {
+        "process.stat" => {
+            let Some(pid) = pid else {
+                eprintln!("igrisctl: process.stat requires --pid");
+                return ExitCode::from(2);
+            };
+            params["pid"] = serde_json::json!(pid);
+        }
+        "process.children" => {
+            let Some(pid) = pid else {
+                eprintln!("igrisctl: process.children requires --pid");
+                return ExitCode::from(2);
+            };
+            params["pid"] = serde_json::json!(pid);
+            if let Some(max) = max {
+                params["max"] = serde_json::json!(max);
+            }
+        }
+        _ => {
+            if let Some(max) = max {
+                params["max"] = serde_json::json!(max);
+            }
+        }
+    }
+
+    let socket_path = resolve_socket_path();
+    let request = build_request(op, params);
+    let response = match send(&socket_path, &request) {
+        Ok(response) => response,
+        Err(e) => {
+            eprintln!(
+                "igrisctl: could not reach daemon at {}: {e}",
+                socket_path.display()
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+
+    if json {
+        match serde_json::to_string_pretty(&response) {
+            Ok(text) => println!("{text}"),
+            Err(e) => {
+                eprintln!("igrisctl: failed to render response: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+    } else if response.ok {
+        print_process_human(op, &response);
+    } else {
+        let code = response
+            .error
+            .as_ref()
+            .map(|e| e.code.as_str())
+            .unwrap_or("UNKNOWN");
+        let message = response
+            .error
+            .as_ref()
+            .map(|e| e.message.as_str())
+            .unwrap_or("no error detail");
+        eprintln!("igrisctl: request failed [{code}]: {message}");
+        return ExitCode::FAILURE;
+    }
+
+    if response.ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn print_process_human(op: &str, response: &igris_proto::Response) {
+    let Some(result) = response.result.as_ref() else {
+        println!("(empty response)");
+        return;
+    };
+    match op {
+        "process.stat" => print_entry(result),
+        "process.list" | "process.children" => {
+            if op == "process.children" {
+                println!("parent pid: {}", field(result, "parent_pid"));
+            }
+            println!("truncated : {}", field(result, "truncated"));
+            if let Some(entries) = result["entries"].as_array() {
+                for entry in entries {
+                    print_entry(entry);
+                    println!("---");
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn print_entry(value: &serde_json::Value) {
+    println!("pid  : {}", field(value, "pid"));
+    println!("ppid : {}", field(value, "ppid"));
+    println!("name : {}", field(value, "name"));
+    println!("state: {}", field(value, "state"));
+    println!("uid  : {}", field(value, "uid"));
+    println!("gid  : {}", field(value, "gid"));
+    println!("rss  : {} kB", field(value, "rss_kb"));
 }
 
 fn print_fs_human(op: &str, response: &igris_proto::Response) {

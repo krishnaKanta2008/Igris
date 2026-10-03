@@ -5,11 +5,13 @@ kernel is the foundation; the project builds a progressively integrated AI
 system layer on top of it, connected through structured tools and APIs and
 governed by a least-privilege permission model.
 
-> **Status: Milestone 2 implemented.** The `igrisd` daemon, `igrisctl` client,
-> default-deny permission engine, live `system.info`, and read-only filesystem
-> tools (`fs.list`, `fs.stat`, `fs.read`) confined to `IGRIS_FS_ROOT` are
-> functional over a versioned Unix-socket protocol with append-only audit
-> logging. The AI agent layer remains a Phase 0 scaffold.
+> **Status: Milestone 3 implemented.** The `igrisd` daemon, `igrisctl` client,
+> default-deny permission engine, live `system.info`, read-only filesystem
+> tools (`fs.list`, `fs.stat`, `fs.read`) confined to `IGRIS_FS_ROOT`, and
+> read-only process observation (`process.list`, `process.stat`,
+> `process.children`) over `/proc` are functional over a versioned
+> Unix-socket protocol with append-only audit logging. The AI agent layer
+> remains a Phase 0 scaffold.
 
 ## Canonical repository location
 
@@ -100,6 +102,11 @@ python -m unittest discover -s agent/tests
 ./target/debug/igrisctl fs.list --path ~/.igris/share
 ./target/debug/igrisctl fs.stat --path ~/.igris/share/some-file
 ./target/debug/igrisctl fs.read --path ~/.igris/share/some-file [--max-bytes N]
+
+# Read-only process observation
+./target/debug/igrisctl process.list [--max N]
+./target/debug/igrisctl process.stat --pid 1
+./target/debug/igrisctl process.children --pid 1
 ```
 
 Socket and audit paths default to the shared locations documented in

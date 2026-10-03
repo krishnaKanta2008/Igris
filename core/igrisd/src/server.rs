@@ -32,6 +32,7 @@ use igris_proto::{
 use crate::audit::{now_rfc3339, AuditLog, AuditRecord, AuditResult};
 use crate::config::Config;
 use crate::providers::fs;
+use crate::providers::process;
 use crate::providers::system_info;
 
 /// Idle timeout for a single connection.
@@ -328,6 +329,30 @@ fn dispatch(
                 denied: false,
             })
         }
+        igris_proto::OP_PROCESS_LIST => {
+            let result = process::list(params).map_err(DispatchFailure::from)?;
+            serde_json::to_value(result).map_err(|_| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: "failed to encode process.list result",
+                denied: false,
+            })
+        }
+        igris_proto::OP_PROCESS_STAT => {
+            let result = process::stat(params).map_err(DispatchFailure::from)?;
+            serde_json::to_value(result).map_err(|_| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: "failed to encode process.stat result",
+                denied: false,
+            })
+        }
+        igris_proto::OP_PROCESS_CHILDREN => {
+            let result = process::children(params).map_err(DispatchFailure::from)?;
+            serde_json::to_value(result).map_err(|_| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: "failed to encode process.children result",
+                denied: false,
+            })
+        }
         _other => Err(DispatchFailure {
             code: error_code::UNKNOWN_OPERATION,
             message: "unsupported operation",
@@ -347,6 +372,16 @@ struct DispatchFailure {
 
 impl From<fs::FsFailure> for DispatchFailure {
     fn from(f: fs::FsFailure) -> Self {
+        Self {
+            code: f.code,
+            message: f.message,
+            denied: f.denied,
+        }
+    }
+}
+
+impl From<process::ProcessFailure> for DispatchFailure {
+    fn from(f: process::ProcessFailure) -> Self {
         Self {
             code: f.code,
             message: f.message,

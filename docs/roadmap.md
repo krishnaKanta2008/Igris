@@ -20,8 +20,11 @@ privilege-separated providers with path allow-lists, a dangerous-operation
 confirmation flow, and append-only audit logging.
 
 ## Phase 3 — Process and event monitoring
-`proc.list`, `proc.inspect`, guarded `proc.signal`, and an event provider using
-inotify (later fanotify). Provider sandboxing via cgroups/namespaces/seccomp.
+Milestone 3 (complete): read-only `process.list`, `process.stat`, and
+`process.children` over `/proc` with bounded, sanitized output and full audit.
+Remaining: guarded process control (`proc.signal`), an event provider via
+inotify/fanotify (separate milestone with a stateful IPC model), and provider
+sandboxing via cgroups/namespaces/seccomp.
 
 ## Phase 4 — AI agent layer
 Agent orchestration restricted to structured tool calls, per-session capability

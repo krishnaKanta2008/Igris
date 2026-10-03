@@ -9,7 +9,7 @@ use igrisd::server::Server;
 
 fn main() -> ExitCode {
     let config = Config::from_env();
-    let policy = Policy::milestone_two();
+    let policy = Policy::milestone_three();
 
     let server = match Server::bind(&config, policy) {
         Ok(server) => Arc::new(server),

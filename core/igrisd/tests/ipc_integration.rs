@@ -144,6 +144,10 @@ fn milestone_two() -> Policy {
     Policy::milestone_two()
 }
 
+fn milestone_three() -> Policy {
+    Policy::milestone_three()
+}
+
 #[test]
 fn valid_system_info_succeeds() {
     let daemon = TestDaemon::start(milestone_one());
@@ -505,4 +509,155 @@ fn milestone_one_policy_still_denies_fs_tools() {
     );
     assert!(!response.ok);
     assert_eq!(response.error.expect("error").code, "DENIED");
+}
+
+#[test]
+fn process_list_succeeds() {
+    let daemon = TestDaemon::start(milestone_three());
+    let payload = serde_json::json!({"version": 1, "id": "proc-list-1", "op": "process.list", "params": {"max": 16}});
+    let response = daemon.raw_exchange(payload.to_string().as_bytes());
+
+    assert!(response.ok, "expected success, got {response:?}");
+    let result = response.result.expect("result present");
+    let entries = result["entries"].as_array().expect("entries array");
+    assert!(entries.len() <= 16);
+    for entry in entries {
+        assert!(entry["pid"].as_u64().unwrap_or(0) >= 1);
+        assert!(entry.get("name").is_some());
+        assert!(entry.get("state").is_some());
+        assert!(entry.get("uid").is_some());
+        assert!(entry.get("gid").is_some());
+        // No sensitive fields may be present.
+        for forbidden in ["cmdline", "environ", "exe", "cwd", "root"] {
+            assert!(entry.get(forbidden).is_none(), "field {forbidden} leaked");
+        }
+    }
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["operation"], "process.list");
+    assert_eq!(audit[0]["decision"], "allow");
+    assert_eq!(audit[0]["result"], "success");
+}
+
+#[test]
+fn process_list_is_sorted_and_bounded() {
+    let daemon = TestDaemon::start(milestone_three());
+    let payload = serde_json::json!({"version": 1, "id": "proc-list-2", "op": "process.list", "params": {"max": 4}});
+    let response = daemon.raw_exchange(payload.to_string().as_bytes());
+
+    assert!(response.ok);
+    let result = response.result.expect("result present");
+    let entries = result["entries"].as_array().expect("entries array");
+    assert!(entries.len() <= 4);
+    let pids: Vec<u64> = entries
+        .iter()
+        .map(|e| e["pid"].as_u64().unwrap_or(0))
+        .collect();
+    let mut sorted = pids.clone();
+    sorted.sort_unstable();
+    assert_eq!(pids, sorted);
+}
+
+#[test]
+fn process_stat_succeeds_for_a_known_live_process() {
+    let daemon = TestDaemon::start(milestone_three());
+    let pid = std::process::id();
+    let payload = serde_json::json!({"version": 1, "id": "proc-stat-1", "op": "process.stat", "params": {"pid": pid}});
+    let response = daemon.raw_exchange(payload.to_string().as_bytes());
+
+    assert!(response.ok, "expected success, got {response:?}");
+    let result = response.result.expect("result present");
+    assert_eq!(result["pid"].as_u64(), Some(pid as u64));
+    assert!(result["name"].as_str().unwrap_or("").len() > 0);
+    assert!(result["ppid"].as_u64().unwrap_or(0) >= 1);
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["operation"], "process.stat");
+    assert_eq!(audit[0]["decision"], "allow");
+    assert_eq!(audit[0]["result"], "success");
+}
+
+#[test]
+fn process_children_succeeds() {
+    let daemon = TestDaemon::start(milestone_three());
+    let pid = std::process::id();
+    let payload = serde_json::json!({"version": 1, "id": "proc-children-1", "op": "process.children", "params": {"pid": pid}});
+    let response = daemon.raw_exchange(payload.to_string().as_bytes());
+
+    assert!(response.ok, "expected success, got {response:?}");
+    let result = response.result.expect("result present");
+    assert_eq!(result["parent_pid"].as_u64(), Some(pid as u64));
+    if let Some(entries) = result["entries"].as_array() {
+        for entry in entries {
+            assert_eq!(entry["ppid"].as_u64(), Some(pid as u64));
+        }
+    }
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["operation"], "process.children");
+    assert_eq!(audit[0]["decision"], "allow");
+    assert_eq!(audit[0]["result"], "success");
+}
+
+#[test]
+fn malformed_process_params_return_bad_request() {
+    let daemon = TestDaemon::start(milestone_three());
+
+    let missing_pid =
+        serde_json::json!({"version": 1, "id": "pp-1", "op": "process.stat", "params": {}});
+    let response = daemon.raw_exchange(missing_pid.to_string().as_bytes());
+    assert_eq!(response.error.expect("error").code, "BAD_REQUEST");
+
+    let wrong_type = serde_json::json!({"version": 1, "id": "pp-2", "op": "process.stat", "params": {"pid": "abc"}});
+    let response = daemon.raw_exchange(wrong_type.to_string().as_bytes());
+    assert_eq!(response.error.expect("error").code, "BAD_REQUEST");
+
+    let pid_zero =
+        serde_json::json!({"version": 1, "id": "pp-3", "op": "process.stat", "params": {"pid": 0}});
+    let response = daemon.raw_exchange(pid_zero.to_string().as_bytes());
+    assert_eq!(response.error.expect("error").code, "BAD_REQUEST");
+
+    let bad_max =
+        serde_json::json!({"version": 1, "id": "pp-4", "op": "process.list", "params": {"max": 0}});
+    let response = daemon.raw_exchange(bad_max.to_string().as_bytes());
+    assert_eq!(response.error.expect("error").code, "BAD_REQUEST");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 4);
+    assert!(audit
+        .iter()
+        .all(|a| a["decision"] == "deny" && a["result"] == "error"));
+}
+
+#[test]
+fn nonexistent_pid_returns_not_found() {
+    let daemon = TestDaemon::start(milestone_three());
+    let payload = serde_json::json!({"version": 1, "id": "pp-nf", "op": "process.stat", "params": {"pid": 4_000_000}});
+    let response = daemon.raw_exchange(payload.to_string().as_bytes());
+
+    assert!(!response.ok);
+    let code = response.error.expect("error").code;
+    assert!(code == "NOT_FOUND" || code == "FS_ERROR", "got {code}");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["result"], "error");
+}
+
+#[test]
+fn deny_all_policy_denies_process_tools() {
+    let daemon = TestDaemon::start(Policy::deny_all());
+    let payload =
+        serde_json::json!({"version": 1, "id": "pp-deny", "op": "process.list", "params": {}});
+    let response = daemon.raw_exchange(payload.to_string().as_bytes());
+    assert!(!response.ok);
+    assert_eq!(response.error.expect("error").code, "DENIED");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "denied");
 }

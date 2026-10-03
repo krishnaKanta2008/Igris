@@ -40,8 +40,34 @@ pub const OP_FS_STAT: &str = "fs.stat";
 /// Operation name for reading file contents.
 pub const OP_FS_READ: &str = "fs.read";
 
+/// Operation name for listing processes.
+pub const OP_PROCESS_LIST: &str = "process.list";
+
+/// Operation name for reading one process's metadata.
+pub const OP_PROCESS_STAT: &str = "process.stat";
+
+/// Operation name for listing a process's direct children.
+pub const OP_PROCESS_CHILDREN: &str = "process.children";
+
 /// Operations supported by this protocol version.
-pub const SUPPORTED_OPERATIONS: &[&str] = &[OP_SYSTEM_INFO, OP_FS_LIST, OP_FS_STAT, OP_FS_READ];
+pub const SUPPORTED_OPERATIONS: &[&str] = &[
+    OP_SYSTEM_INFO,
+    OP_FS_LIST,
+    OP_FS_STAT,
+    OP_FS_READ,
+    OP_PROCESS_LIST,
+    OP_PROCESS_STAT,
+    OP_PROCESS_CHILDREN,
+];
+
+/// Default maximum entries returned by `process.list`/`process.children`.
+pub const PROCESS_DEFAULT_MAX: usize = 128;
+
+/// Hard maximum entries accepted for `process.list`/`process.children`.
+pub const PROCESS_MAX: usize = 512;
+
+/// Hard upper bound accepted for a PID parameter.
+pub const MAX_PID: u64 = 4_000_000;
 
 /// Default maximum entries returned by `fs.list`.
 pub const FS_DEFAULT_MAX_ENTRIES: usize = 256;
@@ -159,11 +185,34 @@ pub fn validate_operation_params(
             validate_path_param(params)?;
             validate_limit_param(params, "max_bytes", FS_MAX_BYTES)
         }
+        OP_PROCESS_LIST => validate_limit_param(params, "max", PROCESS_MAX),
+        OP_PROCESS_STAT => validate_pid_param(params),
+        OP_PROCESS_CHILDREN => {
+            validate_pid_param(params)?;
+            validate_limit_param(params, "max", PROCESS_MAX)
+        }
         other => Err(ProtocolError::new(
             error_code::UNKNOWN_OPERATION,
             format!("unknown operation {other:?}"),
         )),
     }
+}
+
+/// Require a `pid` integer in `1..=MAX_PID`.
+fn validate_pid_param(params: &serde_json::Value) -> Result<(), ProtocolError> {
+    let pid = params
+        .get("pid")
+        .ok_or_else(|| ProtocolError::new(error_code::BAD_REQUEST, "missing required `pid`"))?;
+    let pid = pid.as_u64().ok_or_else(|| {
+        ProtocolError::new(error_code::BAD_REQUEST, "`pid` must be a positive integer")
+    })?;
+    if pid == 0 || pid > MAX_PID {
+        return Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            format!("`pid` must be between 1 and {MAX_PID}"),
+        ));
+    }
+    Ok(())
 }
 
 /// Require a `path` string that is absolute and contains no NUL bytes.
@@ -565,6 +614,84 @@ mod tests {
                 &serde_json::json!({"path": "/x", "max_bytes": FS_MAX_BYTES + 1})
             )
             .expect_err("too many bytes")
+            .code,
+            error_code::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn operation_params_membership_includes_process_ops() {
+        assert!(SUPPORTED_OPERATIONS.contains(&OP_PROCESS_LIST));
+        assert!(SUPPORTED_OPERATIONS.contains(&OP_PROCESS_STAT));
+        assert!(SUPPORTED_OPERATIONS.contains(&OP_PROCESS_CHILDREN));
+        assert!(!SUPPORTED_OPERATIONS.contains(&"process.kill"));
+    }
+
+    #[test]
+    fn operation_params_accept_valid_process_requests() {
+        assert!(validate_operation_params(OP_PROCESS_LIST, &serde_json::json!({})).is_ok());
+        assert!(
+            validate_operation_params(OP_PROCESS_LIST, &serde_json::json!({"max": 64})).is_ok()
+        );
+        assert!(validate_operation_params(OP_PROCESS_STAT, &serde_json::json!({"pid": 1})).is_ok());
+        assert!(validate_operation_params(
+            OP_PROCESS_CHILDREN,
+            &serde_json::json!({"pid": 1234, "max": 8})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn operation_params_reject_malformed_process_requests() {
+        // missing pid
+        assert_eq!(
+            validate_operation_params(OP_PROCESS_STAT, &serde_json::json!({}))
+                .expect_err("missing pid")
+                .code,
+            error_code::BAD_REQUEST
+        );
+        // wrong pid type
+        assert_eq!(
+            validate_operation_params(OP_PROCESS_STAT, &serde_json::json!({"pid": "123"}))
+                .expect_err("string pid")
+                .code,
+            error_code::BAD_REQUEST
+        );
+        // zero pid
+        assert_eq!(
+            validate_operation_params(OP_PROCESS_STAT, &serde_json::json!({"pid": 0}))
+                .expect_err("zero pid")
+                .code,
+            error_code::BAD_REQUEST
+        );
+        // negative pid
+        assert_eq!(
+            validate_operation_params(OP_PROCESS_STAT, &serde_json::json!({"pid": -5}))
+                .expect_err("negative pid")
+                .code,
+            error_code::BAD_REQUEST
+        );
+        // pid above hard maximum
+        assert_eq!(
+            validate_operation_params(OP_PROCESS_STAT, &serde_json::json!({"pid": MAX_PID + 1}))
+                .expect_err("huge pid")
+                .code,
+            error_code::BAD_REQUEST
+        );
+        // invalid max
+        assert_eq!(
+            validate_operation_params(OP_PROCESS_LIST, &serde_json::json!({"max": "lots"}))
+                .expect_err("string max")
+                .code,
+            error_code::BAD_REQUEST
+        );
+        // max above hard limit
+        assert_eq!(
+            validate_operation_params(
+                OP_PROCESS_CHILDREN,
+                &serde_json::json!({"pid": 1, "max": PROCESS_MAX + 1})
+            )
+            .expect_err("too many entries")
             .code,
             error_code::BAD_REQUEST
         );
