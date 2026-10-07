@@ -26,4 +26,23 @@ Thumbs.db
 
 # Local environment
 .env
+.env.*
+!.env.example
 *.local
+
+# Runtime state
+*.log
+audit.log
+*.sock
+
+# Generated / temporary
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# OS / filesystem
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
