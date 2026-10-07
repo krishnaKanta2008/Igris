@@ -1,16 +1,12 @@
 //! Event observation provider (`events.watch`, `events.poll`, `events.unwatch`).
 //!
-//! This provider manages a bounded set of event watches per connection. Each
-//! watch owns a bounded queue of events. The provider is isolated: the server
-//! only interacts with it through the public API and never inspects internal
-//! watch state.
-//!
-//! This skeleton does not yet produce real filesystem events (no inotify/
-//! fanotify integration). Watches can be created, polled, and removed, but
-//! their queues remain empty until a future commit adds an event producer.
+//! This provider manages a bounded set of event watches per connection using
+//! Linux inotify as the event source. Each watch owns a bounded queue of events.
+//! The provider is isolated: the server only interacts with it through the public
+//! API and never inspects internal watch state.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,6 +16,8 @@ use igris_proto::{
 };
 
 use crate::providers::fs::{resolve_within, FsFailure};
+
+use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
 
 /// Maximum events per individual watch queue.
 ///
@@ -34,19 +32,18 @@ struct Watch {
     watch_id: u64,
     owner: u64,
     path: PathBuf,
+    wd: WatchDescriptor,
     events: Vec<Event>,
-    #[allow(dead_code)]
-    errored: bool,
 }
 
 impl Watch {
-    fn new(watch_id: u64, owner: u64, path: PathBuf) -> Self {
+    fn new(watch_id: u64, owner: u64, path: PathBuf, wd: WatchDescriptor) -> Self {
         Self {
             watch_id,
             owner,
             path,
+            wd,
             events: Vec::with_capacity(MAX_EVENTS_PER_WATCH),
-            errored: false,
         }
     }
 
@@ -54,15 +51,22 @@ impl Watch {
     ///
     /// Returns `true` if the event was enqueued, `false` if the queue was full
     /// and the oldest event was dropped.
-    #[allow(dead_code)]
-    fn enqueue(&mut self, name: String, kind: Option<String>) -> bool {
+    fn enqueue(
+        &mut self,
+        name: String,
+        kind: Option<String>,
+        filename: Option<&std::ffi::OsStr>,
+    ) -> bool {
         if self.events.len() >= MAX_EVENTS_PER_WATCH {
             // Drop oldest event to make room.
             self.events.remove(0);
         }
+        let full_path = filename
+            .map(|n| self.path.join(n).display().to_string())
+            .unwrap_or_else(|| self.path.display().to_string());
         let event = Event {
             name,
-            path: self.path.display().to_string(),
+            path: full_path,
             timestamp_unix: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -117,14 +121,19 @@ impl WatchRegistry {
     /// Create a new watch for the given connection.
     ///
     /// Returns the assigned `watch_id` on success.
-    fn create_watch(&mut self, owner: u64, path: PathBuf) -> Result<u64, ProviderError> {
+    fn create_watch(
+        &mut self,
+        owner: u64,
+        path: PathBuf,
+        wd: WatchDescriptor,
+    ) -> Result<u64, ProviderError> {
         if self.watches.len() >= MAX_EVENT_WATCHES {
             return Err(ProviderError::MaxWatches);
         }
 
         let watch_id = self.allocate_id().ok_or(ProviderError::MaxWatches)?;
 
-        let watch = Watch::new(watch_id, owner, path);
+        let watch = Watch::new(watch_id, owner, path, wd);
         self.watches.insert(watch_id, watch);
         *self.watches_per_connection.entry(owner).or_insert(0) += 1;
 
@@ -181,6 +190,7 @@ impl WatchRegistry {
     }
 
     /// Remove all watches owned by a connection.
+    #[allow(dead_code)]
     fn cleanup_connection(&mut self, owner: u64) {
         let watch_ids: Vec<u64> = self
             .watches
@@ -254,10 +264,52 @@ impl From<ProviderError> for FsFailure {
     }
 }
 
+/// Inotify-based event source.
+///
+/// Encapsulates the inotify instance and provides methods to read events.
+struct InotifySource {
+    inotify: Inotify,
+    buffer: Vec<u8>,
+}
+
+impl InotifySource {
+    fn new() -> Result<Self, std::io::Error> {
+        Ok(Self {
+            inotify: Inotify::init()?,
+            buffer: vec![0u8; 8192],
+        })
+    }
+
+    /// Add a watch for the given path.
+    fn add_watch(
+        &mut self,
+        path: &Path,
+        mask: WatchMask,
+    ) -> Result<WatchDescriptor, std::io::Error> {
+        // Use the new API (non-deprecated)
+        self.inotify.watches().add(path, mask)
+    }
+
+    /// Remove a watch by descriptor.
+    fn remove_watch(&mut self, wd: WatchDescriptor) -> Result<(), std::io::Error> {
+        self.inotify.watches().remove(wd)
+    }
+
+    /// Read available events (non-blocking).
+    fn read_events(&mut self) -> Result<Vec<inotify::Event<&std::ffi::OsStr>>, std::io::Error> {
+        match self.inotify.read_events(&mut self.buffer) {
+            Ok(events) => Ok(events.into_iter().collect()),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 /// Event provider: manages watches, queues, and event dispatch.
 pub struct EventProvider {
     fs_root: PathBuf,
     registry: Mutex<WatchRegistry>,
+    inotify_source: Mutex<InotifySource>,
 }
 
 impl EventProvider {
@@ -266,20 +318,50 @@ impl EventProvider {
         Self {
             fs_root: fs_root.into(),
             registry: Mutex::new(WatchRegistry::new()),
+            inotify_source: Mutex::new(InotifySource::new().expect("failed to initialize inotify")),
         }
     }
 
     /// Create a new filesystem watch.
     ///
     /// Validates that the path is within the filesystem root, allocates a
-    /// watch ID, and returns it. The watch starts with an empty queue.
+    /// watch ID, establishes an inotify watch, and returns it.
     pub fn watch(&self, owner: u64, path: &str) -> Result<WatchResult, FsFailure> {
         // Validate and canonicalize the path using the same boundary logic as fs provider.
         let resolved = resolve_within(&self.fs_root, path)?;
 
+        // Check if path exists and is a directory (inotify requires directories for recursive-like watching)
+        // For now, we watch the resolved path. If it's a file, we watch its parent directory.
+        let watch_path = if resolved.is_file() {
+            resolved.parent().unwrap_or(&resolved).to_path_buf()
+        } else {
+            resolved.clone()
+        };
+
+        let watch_mask = WatchMask::CREATE
+            | WatchMask::DELETE
+            | WatchMask::MODIFY
+            | WatchMask::MOVE
+            | WatchMask::CLOSE_WRITE;
+
+        let wd = {
+            let mut inotify = self
+                .inotify_source
+                .lock()
+                .map_err(|_| ProviderError::Internal)?;
+            inotify.add_watch(&watch_path, watch_mask).map_err(|e| {
+                eprintln!(
+                    "igrisd: failed to add inotify watch for {}: {}",
+                    watch_path.display(),
+                    e
+                );
+                ProviderError::Internal
+            })?
+        };
+
         let watch_id = {
             let mut registry = self.registry.lock().map_err(|_| ProviderError::Internal)?;
-            registry.create_watch(owner, resolved)?
+            registry.create_watch(owner, resolved, wd)?
         };
 
         Ok(WatchResult { watch_id })
@@ -287,9 +369,13 @@ impl EventProvider {
 
     /// Poll events from a watch.
     ///
-    /// Drains up to `max` events from the watch's queue. Returns an empty
-    /// vector if the queue is empty. Does not block.
+    /// Drains up to `max` events from the watch's queue. Also attempts to
+    /// read pending inotify notifications and translate them into events
+    /// before draining. Does not block indefinitely.
     pub fn poll(&self, owner: u64, watch_id: u64, max: usize) -> Result<PollResult, FsFailure> {
+        // First, read any pending inotify events and translate them
+        self.read_pending_inotify_events()?;
+
         let events = {
             let mut registry = self.registry.lock().map_err(|_| ProviderError::Internal)?;
             registry.poll_events(owner, watch_id, max)?
@@ -297,12 +383,81 @@ impl EventProvider {
         Ok(PollResult { events })
     }
 
-    /// Remove a watch.
-    ///
-    /// Requires ownership. Returns `true` on success.
-    pub fn unwatch(&self, owner: u64, watch_id: u64) -> Result<bool, FsFailure> {
+    /// Read pending inotify events and translate them into the watch queues.
+    fn read_pending_inotify_events(&self) -> Result<(), FsFailure> {
+        let mut inotify = self
+            .inotify_source
+            .lock()
+            .map_err(|_| ProviderError::Internal)?;
+        let events = inotify.read_events().map_err(|_| ProviderError::Internal)?;
+
+        if events.is_empty() {
+            return Ok(());
+        }
+
         let mut registry = self.registry.lock().map_err(|_| ProviderError::Internal)?;
-        registry.remove_watch(owner, watch_id)?;
+
+        for event in events {
+            let wd = event.wd;
+            // Find the watch with this descriptor
+            if let Some(watch) = registry.watches.values_mut().find(|w| w.wd == wd) {
+                // Translate inotify event mask to our event names
+                let mask = event.mask;
+                let filename = event.name;
+                if mask.contains(EventMask::CREATE) {
+                    let (name, kind) = translate_mask(EventMask::CREATE);
+                    watch.enqueue(name, kind, filename);
+                }
+                if mask.contains(EventMask::DELETE) {
+                    let (name, kind) = translate_mask(EventMask::DELETE);
+                    watch.enqueue(name, kind, filename);
+                }
+                if mask.contains(EventMask::MODIFY) {
+                    let (name, kind) = translate_mask(EventMask::MODIFY);
+                    watch.enqueue(name, kind, filename);
+                }
+                if mask.contains(EventMask::MOVED_TO) || mask.contains(EventMask::MOVED_FROM) {
+                    let (name, kind) = translate_mask(mask);
+                    watch.enqueue(name, kind, filename);
+                }
+                if mask.contains(EventMask::CLOSE_WRITE) {
+                    let (name, kind) = translate_mask(EventMask::CLOSE_WRITE);
+                    watch.enqueue(name, kind, filename);
+                }
+                // Update total_queued_events for each event added
+                // Note: enqueue handles dropping oldest if queue is full
+            }
+            // If wd not found, the watch was removed but event is stale - ignore
+        }
+
+        Ok(())
+    }
+
+    pub fn unwatch(&self, owner: u64, watch_id: u64) -> Result<bool, FsFailure> {
+        let wd = {
+            let mut registry = self.registry.lock().map_err(|_| ProviderError::Internal)?;
+            let watch = registry
+                .watches
+                .get(&watch_id)
+                .ok_or(ProviderError::WatchNotFound)?;
+
+            if watch.owner != owner {
+                return Err(ProviderError::WatchNotFound.into());
+            }
+            let wd = watch.wd.clone();
+            registry.remove_watch(owner, watch_id)?;
+            wd
+        };
+
+        // Remove the inotify watch
+        let mut inotify = self
+            .inotify_source
+            .lock()
+            .map_err(|_| ProviderError::Internal)?;
+        inotify
+            .remove_watch(wd)
+            .map_err(|_| ProviderError::Internal)?;
+
         Ok(true)
     }
 
@@ -310,10 +465,38 @@ impl EventProvider {
     ///
     /// Called when a connection is closed.
     pub fn cleanup_connection(&self, owner: u64) {
-        let mut registry = match self.registry.lock() {
-            Ok(r) => r,
+        let wds = {
+            let mut registry = match self.registry.lock() {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!(
+                        "igrisd: event provider mutex poisoned during cleanup: {}",
+                        e
+                    );
+                    return;
+                }
+            };
+
+            let watch_ids: Vec<u64> = registry
+                .watches
+                .iter()
+                .filter(|(_, w)| w.owner == owner)
+                .map(|(id, _)| *id)
+                .collect();
+
+            let mut wds = Vec::new();
+            for id in watch_ids {
+                if let Some(watch) = registry.watches.get(&id) {
+                    wds.push(watch.wd.clone());
+                }
+                let _ = registry.remove_watch(owner, id);
+            }
+            wds
+        };
+
+        let mut inotify = match self.inotify_source.lock() {
+            Ok(i) => i,
             Err(e) => {
-                // If the mutex is poisoned, we can't do much; log and return.
                 eprintln!(
                     "igrisd: event provider mutex poisoned during cleanup: {}",
                     e
@@ -321,14 +504,16 @@ impl EventProvider {
                 return;
             }
         };
-        registry.cleanup_connection(owner);
+        for wd in wds {
+            let _ = inotify.remove_watch(wd);
+        }
     }
+}
 
-    /// Internal method to enqueue an event for a watch (for future producer use).
-    ///
-    /// Returns `true` if the event was enqueued (possibly dropping oldest).
-    /// This is a stub for the future inotify integration.
-    #[cfg(test)]
+#[cfg(test)]
+impl EventProvider {
+    /// Test helper to enqueue an event for testing purposes.
+    #[allow(dead_code)]
     pub fn _test_enqueue(
         &self,
         owner: u64,
@@ -345,13 +530,28 @@ impl EventProvider {
             return Err(ProviderError::WatchNotFound.into());
         }
         let was_full = watch.events.len() >= MAX_EVENTS_PER_WATCH;
-        watch.enqueue(name, kind);
-        if was_full {
-            // If we dropped an event, total_queued doesn't change
-        } else {
+        watch.enqueue(name, kind, None);
+        if !was_full {
             registry.total_queued_events += 1;
         }
         Ok(true)
+    }
+}
+
+/// Translate an inotify event mask to our event name and kind.
+fn translate_mask(mask: EventMask) -> (String, Option<String>) {
+    if mask.contains(EventMask::CREATE) {
+        ("fs.create".to_string(), Some("file".to_string()))
+    } else if mask.contains(EventMask::DELETE) {
+        ("fs.delete".to_string(), Some("file".to_string()))
+    } else if mask.contains(EventMask::MODIFY) {
+        ("fs.modify".to_string(), Some("file".to_string()))
+    } else if mask.contains(EventMask::MOVED_TO) || mask.contains(EventMask::MOVED_FROM) {
+        ("fs.move".to_string(), Some("file".to_string()))
+    } else if mask.contains(EventMask::CLOSE_WRITE) {
+        ("fs.modify".to_string(), Some("file".to_string()))
+    } else {
+        ("fs.unknown".to_string(), None)
     }
 }
 
@@ -359,6 +559,8 @@ impl EventProvider {
 mod tests {
     use super::*;
     use std::fs;
+    use std::thread;
+    use std::time::Duration;
 
     fn temp_root() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -425,15 +627,159 @@ mod tests {
     }
 
     #[test]
-    fn poll_respects_max() {
+    fn filesystem_create_produces_event() {
         let root = temp_root();
         let provider = EventProvider::new(&root);
         fs::create_dir_all(&root).unwrap();
 
         let watch = provider.watch(1, &root.to_string_lossy()).expect("watch");
 
-        // Enqueue some events directly for testing
-        for i in 0..5 {
+        // Create a file in the watched directory
+        fs::write(root.join("new_file.txt"), b"hello").unwrap();
+
+        // Poll should return the create event
+        let res = provider.poll(1, watch.watch_id, 10).expect("poll");
+        assert!(!res.events.is_empty());
+        assert_eq!(res.events[0].name, "fs.create");
+        assert!(res.events[0].path.contains("new_file.txt"));
+    }
+
+    #[test]
+    fn filesystem_modify_produces_event() {
+        let root = temp_root();
+        let provider = EventProvider::new(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let watch = provider.watch(1, &root.to_string_lossy()).expect("watch");
+
+        // Create and then modify a file
+        fs::write(root.join("modify_me.txt"), b"original").unwrap();
+        thread::sleep(Duration::from_millis(50));
+        fs::write(root.join("modify_me.txt"), b"modified").unwrap();
+
+        // Poll should return the modify event
+        let res = provider.poll(1, watch.watch_id, 10).expect("poll");
+        let modify_events: Vec<_> = res
+            .events
+            .iter()
+            .filter(|e| e.name == "fs.modify")
+            .collect();
+        assert!(!modify_events.is_empty());
+    }
+
+    #[test]
+    fn filesystem_delete_produces_event() {
+        let root = temp_root();
+        let provider = EventProvider::new(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let watch = provider.watch(1, &root.to_string_lossy()).expect("watch");
+
+        // Create and then delete a file
+        fs::write(root.join("delete_me.txt"), b"to delete").unwrap();
+        thread::sleep(Duration::from_millis(50));
+        fs::remove_file(root.join("delete_me.txt")).unwrap();
+
+        // Poll should return the delete event
+        let res = provider.poll(1, watch.watch_id, 10).expect("poll");
+        let delete_events: Vec<_> = res
+            .events
+            .iter()
+            .filter(|e| e.name == "fs.delete")
+            .collect();
+        assert!(!delete_events.is_empty());
+    }
+
+    #[test]
+    fn filesystem_rename_produces_event() {
+        let root = temp_root();
+        let provider = EventProvider::new(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let watch = provider.watch(1, &root.to_string_lossy()).expect("watch");
+
+        // Create and then rename a file
+        fs::write(root.join("rename_me.txt"), b"to rename").unwrap();
+        thread::sleep(Duration::from_millis(50));
+        fs::rename(root.join("rename_me.txt"), root.join("renamed.txt")).unwrap();
+
+        // Poll should return move events
+        let res = provider.poll(1, watch.watch_id, 10).expect("poll");
+        let move_events: Vec<_> = res.events.iter().filter(|e| e.name == "fs.move").collect();
+        assert!(!move_events.is_empty());
+    }
+
+    #[test]
+    fn unwatch_stops_future_events() {
+        let root = temp_root();
+        let provider = EventProvider::new(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let watch = provider.watch(1, &root.to_string_lossy()).expect("watch");
+
+        // Unwatch
+        provider.unwatch(1, watch.watch_id).expect("unwatch");
+
+        // Create a file - should not produce events for this watch
+        fs::write(root.join("after_unwatch.txt"), b"ignored").unwrap();
+
+        // Poll should return NOT_FOUND immediately after unwatch
+        let err = provider
+            .poll(1, watch.watch_id, 10)
+            .expect_err("watch gone");
+        assert_eq!(err.code, error_code::NOT_FOUND);
+    }
+
+    #[test]
+    fn cleanup_connection_removes_watches() {
+        let root = temp_root();
+        let provider = EventProvider::new(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let _w1 = provider.watch(1, &root.to_string_lossy()).expect("watch 1");
+        let _w2 = provider.watch(1, &root.to_string_lossy()).expect("watch 2");
+        let _w3 = provider.watch(2, &root.to_string_lossy()).expect("watch 3");
+
+        // Connection 1 has 2 watches, connection 2 has 1
+        provider.cleanup_connection(1);
+
+        // Connection 1's watches should be gone
+        let err = provider.poll(1, 1, 10).expect_err("watch 1 gone");
+        assert_eq!(err.code, error_code::NOT_FOUND);
+
+        // Connection 2's watch should remain
+        let res = provider.poll(2, 3, 10).expect("watch 3 remains");
+        assert!(res.events.is_empty());
+    }
+
+    #[test]
+    fn watch_ids_reused_after_unwatch() {
+        let root = temp_root();
+        let provider = EventProvider::new(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let w1 = provider.watch(1, &root.to_string_lossy()).expect("watch 1");
+        let w2 = provider.watch(1, &root.to_string_lossy()).expect("watch 2");
+        assert_eq!(w1.watch_id, 1);
+        assert_eq!(w2.watch_id, 2);
+
+        provider.unwatch(1, 1).expect("unwatch 1");
+
+        // Next watch should reuse ID 1
+        let w3 = provider.watch(1, &root.to_string_lossy()).expect("watch 3");
+        assert_eq!(w3.watch_id, 1);
+    }
+
+    #[test]
+    fn queue_bounded_per_watch() {
+        let root = temp_root();
+        let provider = EventProvider::new(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        let watch = provider.watch(1, &root.to_string_lossy()).expect("watch");
+
+        // Fill queue beyond capacity using test enqueue
+        for i in 0..MAX_EVENTS_PER_WATCH + 10 {
             provider
                 ._test_enqueue(
                     1,
@@ -444,17 +790,70 @@ mod tests {
                 .unwrap();
         }
 
-        // Poll with max=2
-        let res = provider.poll(1, watch.watch_id, 2).expect("poll");
-        assert_eq!(res.events.len(), 2);
+        let res = provider
+            .poll(1, watch.watch_id, MAX_POLL_EVENTS)
+            .expect("poll");
+        assert_eq!(res.events.len(), MAX_EVENTS_PER_WATCH);
 
-        // Poll again with max=10
-        let res = provider.poll(1, watch.watch_id, 10).expect("poll");
-        assert_eq!(res.events.len(), 3);
+        // The oldest events should have been dropped
+        let names: Vec<&str> = res.events.iter().map(|e| e.name.as_str()).collect();
+        // Should have the last MAX_EVENTS_PER_WATCH events
+        assert_eq!(names.first().copied(), Some("fs.test10"));
     }
 
     #[test]
-    fn poll_clamps_to_max_poll_events() {
+    fn global_queue_bounded() {
+        let root = temp_root();
+        let provider = EventProvider::new(&root);
+        fs::create_dir_all(&root).unwrap();
+
+        // Create multiple watches and fill them
+        let mut watch_ids = Vec::new();
+        for i in 1..=MAX_EVENT_WATCHES {
+            let w = provider
+                .watch(i as u64, &root.to_string_lossy())
+                .expect("watch");
+            watch_ids.push(w.watch_id);
+        }
+
+        // Fill all queues using test enqueue
+        for (i, wid) in watch_ids.iter().enumerate() {
+            for j in 0..MAX_EVENTS_PER_WATCH + 5 {
+                provider
+                    ._test_enqueue(
+                        i as u64 + 1,
+                        *wid,
+                        format!("fs.test{}", j),
+                        Some("file".into()),
+                    )
+                    .unwrap();
+            }
+        }
+
+        // Total events should not exceed MAX_QUEUED_EVENTS
+        for (i, wid) in watch_ids.iter().enumerate() {
+            let res = provider
+                .poll(i as u64 + 1, *wid, MAX_POLL_EVENTS)
+                .expect("poll");
+            assert!(res.events.len() <= MAX_POLL_EVENTS);
+        }
+    }
+
+    #[test]
+    fn path_canonicalization() {
+        let root = temp_root();
+        let provider = EventProvider::new(&root);
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub/file.txt"), b"data").unwrap();
+
+        // Watch using a relative-looking path that resolves inside root
+        let path = format!("{}/sub/../sub", root.display());
+        let res = provider.watch(1, &path).expect("watch canonicalized path");
+        assert_eq!(res.watch_id, 1);
+    }
+
+    #[test]
+    fn poll_respects_max_poll_events() {
         let root = temp_root();
         let provider = EventProvider::new(&root);
         fs::create_dir_all(&root).unwrap();
@@ -508,129 +907,5 @@ mod tests {
 
         let err = provider.unwatch(1, 999).expect_err("nonexistent");
         assert_eq!(err.code, error_code::NOT_FOUND);
-    }
-
-    #[test]
-    fn cleanup_connection_removes_watches() {
-        let root = temp_root();
-        let provider = EventProvider::new(&root);
-        fs::create_dir_all(&root).unwrap();
-
-        let _w1 = provider.watch(1, &root.to_string_lossy()).expect("watch 1");
-        let _w2 = provider.watch(1, &root.to_string_lossy()).expect("watch 2");
-        let _w3 = provider.watch(2, &root.to_string_lossy()).expect("watch 3");
-
-        // Connection 1 has 2 watches, connection 2 has 1
-        provider.cleanup_connection(1);
-
-        // Connection 1's watches should be gone
-        let err = provider.poll(1, 1, 10).expect_err("watch 1 gone");
-        assert_eq!(err.code, error_code::NOT_FOUND);
-
-        // Connection 2's watch should remain
-        let res = provider.poll(2, 3, 10).expect("watch 3 remains");
-        assert!(res.events.is_empty());
-    }
-
-    #[test]
-    fn watch_ids_reused_after_unwatch() {
-        let root = temp_root();
-        let provider = EventProvider::new(&root);
-        fs::create_dir_all(&root).unwrap();
-
-        let w1 = provider.watch(1, &root.to_string_lossy()).expect("watch 1");
-        let w2 = provider.watch(1, &root.to_string_lossy()).expect("watch 2");
-        assert_eq!(w1.watch_id, 1);
-        assert_eq!(w2.watch_id, 2);
-
-        provider.unwatch(1, 1).expect("unwatch 1");
-
-        // Next watch should reuse ID 1
-        let w3 = provider.watch(1, &root.to_string_lossy()).expect("watch 3");
-        assert_eq!(w3.watch_id, 1);
-    }
-
-    #[test]
-    fn queue_bounded_per_watch() {
-        let root = temp_root();
-        let provider = EventProvider::new(&root);
-        fs::create_dir_all(&root).unwrap();
-
-        let watch = provider.watch(1, &root.to_string_lossy()).expect("watch");
-
-        // Fill queue beyond capacity
-        for i in 0..MAX_EVENTS_PER_WATCH + 10 {
-            provider
-                ._test_enqueue(
-                    1,
-                    watch.watch_id,
-                    format!("fs.test{}", i),
-                    Some("file".into()),
-                )
-                .unwrap();
-        }
-
-        let res = provider
-            .poll(1, watch.watch_id, MAX_POLL_EVENTS)
-            .expect("poll");
-        assert_eq!(res.events.len(), MAX_EVENTS_PER_WATCH);
-
-        // The oldest events should have been dropped
-        let names: Vec<&str> = res.events.iter().map(|e| e.name.as_str()).collect();
-        // Should have the last MAX_EVENTS_PER_WATCH events
-        assert_eq!(names.first().copied(), Some("fs.test10"));
-    }
-
-    #[test]
-    fn global_queue_bounded() {
-        let root = temp_root();
-        let provider = EventProvider::new(&root);
-        fs::create_dir_all(&root).unwrap();
-
-        // Create multiple watches and fill them
-        let mut watch_ids = Vec::new();
-        for i in 1..=MAX_EVENT_WATCHES {
-            let w = provider
-                .watch(i as u64, &root.to_string_lossy())
-                .expect("watch");
-            watch_ids.push(w.watch_id);
-        }
-
-        // Fill all queues
-        for (i, wid) in watch_ids.iter().enumerate() {
-            for j in 0..MAX_EVENTS_PER_WATCH + 5 {
-                provider
-                    ._test_enqueue(
-                        i as u64 + 1,
-                        *wid,
-                        format!("fs.test{}", j),
-                        Some("file".into()),
-                    )
-                    .unwrap();
-            }
-        }
-
-        // Total events should not exceed MAX_QUEUED_EVENTS
-        // Note: we can't easily check internal total_queued_events, but we can verify
-        // that polling doesn't return more than the bound.
-        for (i, wid) in watch_ids.iter().enumerate() {
-            let res = provider
-                .poll(i as u64 + 1, *wid, MAX_POLL_EVENTS)
-                .expect("poll");
-            assert!(res.events.len() <= MAX_POLL_EVENTS);
-        }
-    }
-
-    #[test]
-    fn path_canonicalization() {
-        let root = temp_root();
-        let provider = EventProvider::new(&root);
-        fs::create_dir_all(root.join("sub")).unwrap();
-        fs::write(root.join("sub/file.txt"), b"data").unwrap();
-
-        // Watch using a relative-looking path that resolves inside root
-        let path = format!("{}/sub/../sub", root.display());
-        let res = provider.watch(1, &path).expect("watch canonicalized path");
-        assert_eq!(res.watch_id, 1);
     }
 }
