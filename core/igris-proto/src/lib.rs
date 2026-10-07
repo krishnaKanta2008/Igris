@@ -55,6 +55,18 @@ pub const OP_PROCESS_STAT: &str = "process.stat";
 /// Operation name for listing a process's direct children.
 pub const OP_PROCESS_CHILDREN: &str = "process.children";
 
+/// Operation name for delivering an allowed signal to a process.
+pub const OP_PROC_SIGNAL: &str = "proc.signal";
+
+/// Operation name for registering a filesystem event watch.
+pub const OP_EVENTS_WATCH: &str = "events.watch";
+
+/// Operation name for draining queued events.
+pub const OP_EVENTS_POLL: &str = "events.poll";
+
+/// Operation name for removing an event watch.
+pub const OP_EVENTS_UNWATCH: &str = "events.unwatch";
+
 /// Operations supported by this protocol version.
 pub const SUPPORTED_OPERATIONS: &[&str] = &[
     OP_SYSTEM_INFO,
@@ -66,7 +78,29 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     OP_PROCESS_LIST,
     OP_PROCESS_STAT,
     OP_PROCESS_CHILDREN,
+    OP_PROC_SIGNAL,
+    OP_EVENTS_WATCH,
+    OP_EVENTS_POLL,
+    OP_EVENTS_UNWATCH,
 ];
+
+/// The only signal number exposed by `proc.signal` in Milestone 5.
+pub const SIGNAL_SIGTERM: u64 = 15;
+
+/// Explicit allow-list of signal numbers accepted by `proc.signal`.
+pub const ALLOWED_SIGNALS: &[u64] = &[SIGNAL_SIGTERM];
+
+/// Maximum concurrently registered event watches.
+pub const MAX_EVENT_WATCHES: usize = 16;
+
+/// Maximum queued events retained across all watches.
+pub const MAX_QUEUED_EVENTS: usize = 256;
+
+/// Maximum events returned by one `events.poll` call.
+pub const MAX_POLL_EVENTS: usize = 128;
+
+/// Maximum length of an event name retained in a queued event.
+pub const MAX_EVENT_NAME: usize = 128;
 
 /// Default maximum entries returned by `process.list`/`process.children`.
 pub const PROCESS_DEFAULT_MAX: usize = 128;
@@ -215,6 +249,20 @@ pub fn validate_operation_params(
             validate_pid_param(params)?;
             validate_limit_param(params, "max", PROCESS_MAX)
         }
+        OP_PROC_SIGNAL => {
+            validate_pid_param(params)?;
+            validate_signal_param(params)?;
+            validate_confirmation_param(params)
+        }
+        OP_EVENTS_WATCH => validate_path_param(params),
+        OP_EVENTS_POLL => {
+            if let Some(value) = params.get("max") {
+                validate_limit_param(params, "max", MAX_POLL_EVENTS)?;
+                let _ = value;
+            }
+            Ok(())
+        }
+        OP_EVENTS_UNWATCH => validate_watch_id_param(params),
         other => Err(ProtocolError::new(
             error_code::UNKNOWN_OPERATION,
             format!("unknown operation {other:?}"),
@@ -255,6 +303,32 @@ fn validate_confirmation_param(params: &serde_json::Value) -> Result<(), Protoco
             "`confirm` must be a boolean",
         )),
     }
+}
+
+/// Require a signal number within the explicit allow-list.
+fn validate_signal_param(params: &serde_json::Value) -> Result<(), ProtocolError> {
+    let signal = params
+        .get("signal")
+        .ok_or_else(|| ProtocolError::new(error_code::BAD_REQUEST, "missing required `signal`"))?;
+    let signal = signal.as_u64().ok_or_else(|| {
+        ProtocolError::new(
+            error_code::BAD_REQUEST,
+            "`signal` must be a positive integer",
+        )
+    })?;
+    if signal == 0 {
+        return Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            "`signal` must be a positive integer",
+        ));
+    }
+    if !ALLOWED_SIGNALS.contains(&signal) {
+        return Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            format!("signal {} is not in the allow-list", signal),
+        ));
+    }
+    Ok(())
 }
 
 /// Require a `pid` integer in `1..=MAX_PID`.
@@ -298,6 +372,26 @@ fn validate_path_param(params: &serde_json::Value) -> Result<(), ProtocolError> 
         return Err(ProtocolError::new(
             error_code::BAD_REQUEST,
             "`path` must be absolute",
+        ));
+    }
+    Ok(())
+}
+
+/// Require a `watch_id` integer in `1..=MAX_EVENT_WATCHES`.
+fn validate_watch_id_param(params: &serde_json::Value) -> Result<(), ProtocolError> {
+    let watch_id = params.get("watch_id").ok_or_else(|| {
+        ProtocolError::new(error_code::BAD_REQUEST, "missing required `watch_id`")
+    })?;
+    let watch_id = watch_id.as_u64().ok_or_else(|| {
+        ProtocolError::new(
+            error_code::BAD_REQUEST,
+            "`watch_id` must be a positive integer",
+        )
+    })?;
+    if watch_id == 0 || watch_id > MAX_EVENT_WATCHES as u64 {
+        return Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            format!("`watch_id` must be between 1 and {}", MAX_EVENT_WATCHES),
         ));
     }
     Ok(())

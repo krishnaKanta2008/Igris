@@ -406,6 +406,14 @@ fn dispatch(
                 denied: false,
             })
         }
+        igris_proto::OP_PROC_SIGNAL => {
+            let result = process::signal(params).map_err(DispatchFailure::from)?;
+            serde_json::to_value(result).map_err(|_| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: "failed to encode process.signal result",
+                denied: false,
+            })
+        }
         _other => Err(DispatchFailure {
             code: error_code::UNKNOWN_OPERATION,
             message: "unsupported operation",

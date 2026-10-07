@@ -19,6 +19,7 @@ igris-proto.workspace = true
 igris-permd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+libc = "0.2"
 
 [dev-dependencies]
 igris-proto.workspace = true

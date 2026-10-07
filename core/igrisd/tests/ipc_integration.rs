@@ -167,6 +167,16 @@ fn milestone_three() -> Policy {
     Policy::milestone_three()
 }
 
+/// Milestone 5 policy with process control enabled.
+fn milestone_five_process_control() -> Policy {
+    Policy::milestone_five(true, true)
+}
+
+/// Milestone 5 policy with process control disabled.
+fn milestone_five_no_process_control() -> Policy {
+    Policy::milestone_five(true, false)
+}
+
 #[test]
 fn valid_system_info_succeeds() {
     let daemon = TestDaemon::start(milestone_one());
@@ -982,4 +992,265 @@ fn escaping_symlink_is_rejected_and_target_untouched() {
     assert!(audit
         .iter()
         .all(|a| a["decision"] == "deny" && a["result"] == "error"));
+}
+
+/// proc.signal is denied when process control is disabled.
+#[test]
+fn proc_signal_denied_when_process_control_disabled() {
+    let daemon = TestDaemon::start(milestone_five_no_process_control());
+    let pid = std::process::id();
+    let response = daemon.raw_exchange(
+        serde_json::json!({
+            "version": 1,
+            "id": "ps-1",
+            "op": "proc.signal",
+            "params": {"pid": pid, "signal": 15, "confirm": true}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+
+    assert!(!response.ok);
+    assert_eq!(response.error.expect("error").code, "DENIED");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["operation"], "proc.signal");
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "denied");
+}
+
+/// proc.signal rejects missing confirm.
+#[test]
+fn proc_signal_missing_confirm_rejected() {
+    let daemon = TestDaemon::start(milestone_five_process_control());
+    let pid = std::process::id();
+    let response = daemon.raw_exchange(
+        serde_json::json!({
+            "version": 1,
+            "id": "ps-2",
+            "op": "proc.signal",
+            "params": {"pid": pid, "signal": 15}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+
+    assert!(!response.ok);
+    let err = response.error.as_ref().expect("error");
+    assert_eq!(err.code, "BAD_REQUEST");
+    assert!(err.message.contains("confirm"));
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "error");
+}
+
+/// proc.signal rejects confirm: false.
+#[test]
+fn proc_signal_confirm_false_rejected() {
+    let daemon = TestDaemon::start(milestone_five_process_control());
+    let pid = std::process::id();
+    let response = daemon.raw_exchange(
+        serde_json::json!({
+            "version": 1,
+            "id": "ps-3",
+            "op": "proc.signal",
+            "params": {"pid": pid, "signal": 15, "confirm": false}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+
+    assert!(!response.ok);
+    let err = response.error.as_ref().expect("error");
+    assert_eq!(err.code, "BAD_REQUEST");
+    assert!(err.message.contains("confirm"));
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "error");
+}
+
+/// proc.signal rejects unsupported signal.
+#[test]
+fn proc_signal_unsupported_signal_rejected() {
+    let daemon = TestDaemon::start(milestone_five_process_control());
+    let pid = std::process::id();
+    let response = daemon.raw_exchange(
+        serde_json::json!({
+            "version": 1,
+            "id": "ps-4",
+            "op": "proc.signal",
+            "params": {"pid": pid, "signal": 9, "confirm": true}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+
+    assert!(!response.ok);
+    let err = response.error.as_ref().expect("error");
+    assert_eq!(err.code, "BAD_REQUEST");
+    assert!(err.message.contains("allow-list"));
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "error");
+}
+
+/// proc.signal rejects PID 0.
+#[test]
+fn proc_signal_pid_zero_rejected() {
+    let daemon = TestDaemon::start(milestone_five_process_control());
+    let response = daemon.raw_exchange(
+        serde_json::json!({
+            "version": 1,
+            "id": "ps-5",
+            "op": "proc.signal",
+            "params": {"pid": 0, "signal": 15, "confirm": true}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+
+    assert!(!response.ok);
+    assert_eq!(response.error.expect("error").code, "BAD_REQUEST");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "error");
+}
+
+/// proc.signal rejects negative PID.
+#[test]
+fn proc_signal_negative_pid_rejected() {
+    let daemon = TestDaemon::start(milestone_five_process_control());
+    let response = daemon.raw_exchange(
+        serde_json::json!({
+            "version": 1,
+            "id": "ps-6",
+            "op": "proc.signal",
+            "params": {"pid": -1, "signal": 15, "confirm": true}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+
+    assert!(!response.ok);
+    assert_eq!(response.error.expect("error").code, "BAD_REQUEST");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "error");
+}
+
+/// proc.signal rejects self-signaling.
+#[test]
+fn proc_signal_self_signaling_rejected() {
+    let daemon = TestDaemon::start(milestone_five_process_control());
+    let pid = std::process::id();
+    let response = daemon.raw_exchange(
+        serde_json::json!({
+            "version": 1,
+            "id": "ps-7",
+            "op": "proc.signal",
+            "params": {"pid": pid, "signal": 15, "confirm": true}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+
+    assert!(!response.ok);
+    let err = response.error.as_ref().expect("error");
+    assert_eq!(err.code, "BAD_REQUEST");
+    assert!(err.message.contains("self"));
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["decision"], "deny");
+    assert_eq!(audit[0]["result"], "error");
+}
+
+/// proc.signal returns sanitized NOT_FOUND for nonexistent PID.
+#[test]
+fn proc_signal_nonexistent_pid_returns_not_found() {
+    let daemon = TestDaemon::start(milestone_five_process_control());
+    let response = daemon.raw_exchange(
+        serde_json::json!({
+            "version": 1,
+            "id": "ps-8",
+            "op": "proc.signal",
+            "params": {"pid": 4_000_000, "signal": 15, "confirm": true}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+
+    assert!(!response.ok);
+    let code = response.error.expect("error").code;
+    assert!(code == "NOT_FOUND" || code == "FS_ERROR", "got {code}");
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["result"], "error");
+    // Audit must not contain PID or signal details.
+    let audit_str = audit[0].to_string();
+    assert!(!audit_str.contains("4000000"));
+    assert!(!audit_str.contains("15"));
+}
+
+/// proc.signal can send SIGTERM to a controlled child process.
+#[test]
+fn proc_signal_succeeds_on_controlled_child() {
+    use std::process::Command;
+    use std::time::Duration;
+
+    let daemon = TestDaemon::start(milestone_five_process_control());
+
+    // Spawn a child process that ignores SIGTERM so we can verify it was sent.
+    // Use a simple sleep process.
+    let mut child = Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn sleep child");
+    let child_pid = child.id();
+
+    // Give the child a moment to start.
+    std::thread::sleep(Duration::from_millis(50));
+
+    // Send SIGTERM via proc.signal.
+    let response = daemon.raw_exchange(
+        serde_json::json!({
+            "version": 1,
+            "id": "ps-9",
+            "op": "proc.signal",
+            "params": {"pid": child_pid, "signal": 15, "confirm": true}
+        })
+        .to_string()
+        .as_bytes(),
+    );
+
+    // Clean up the child regardless of test outcome.
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(response.ok, "expected success, got {response:?}");
+    let result = response.result.expect("result present");
+    assert_eq!(result["sent"], true);
+
+    let audit = daemon.audit_lines();
+    assert_eq!(audit.len(), 1);
+    assert_eq!(audit[0]["operation"], "proc.signal");
+    assert_eq!(audit[0]["decision"], "allow");
+    assert_eq!(audit[0]["result"], "success");
+    // Audit must not contain PID, signal, or process details.
+    let audit_str = audit[0].to_string();
+    assert!(!audit_str.contains(&child_pid.to_string()));
+    assert!(!audit_str.contains("15"));
+    assert!(!audit_str.contains("sleep"));
 }

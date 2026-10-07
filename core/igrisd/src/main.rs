@@ -10,7 +10,8 @@ use igrisd::server::Server;
 fn main() -> ExitCode {
     let config = Config::from_env();
     let writes_enabled = !config.writable_paths.is_empty();
-    let policy = Policy::milestone_four(writes_enabled);
+    let process_control_enabled = config.process_control_enabled;
+    let policy = Policy::milestone_five(writes_enabled, process_control_enabled);
 
     let server = match Server::bind(&config, policy) {
         Ok(server) => Arc::new(server),

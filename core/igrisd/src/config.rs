@@ -32,6 +32,10 @@ pub struct Config {
     /// Empty by default. These paths are configuration, not policy grants
     /// by themselves; the daemon will enforce containment before dispatch.
     pub writable_paths: Vec<PathBuf>,
+
+    /// When `true`, process control operations (e.g. `proc.signal`) are
+    /// permitted by policy. Defaults to `false` (default-deny).
+    pub process_control_enabled: bool,
 }
 
 impl Config {
@@ -60,6 +64,13 @@ impl Config {
                         .collect()
                 })
                 .unwrap_or_default(),
+
+            process_control_enabled: std::env::var_os("IGRIS_PROCESS_CONTROL")
+                .map(|v| {
+                    let s = v.to_string_lossy();
+                    s != "0" && s != "false"
+                })
+                .unwrap_or(false),
         }
     }
 
@@ -72,6 +83,7 @@ impl Config {
             audit_log_path: audit_log_path.into(),
             fs_root: default_fs_root(),
             writable_paths: Vec::new(),
+            process_control_enabled: false,
         }
     }
 
@@ -89,6 +101,7 @@ impl Config {
             audit_log_path: audit_log_path.into(),
             fs_root: fs_root.into(),
             writable_paths: Vec::new(),
+            process_control_enabled: false,
         }
     }
 
@@ -104,6 +117,7 @@ impl Config {
             audit_log_path: audit_log_path.into(),
             fs_root: fs_root.into(),
             writable_paths: writable_paths.into_iter().map(Into::into).collect(),
+            process_control_enabled: false,
         }
     }
 }

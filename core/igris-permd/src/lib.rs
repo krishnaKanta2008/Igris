@@ -101,6 +101,21 @@ impl Policy {
         policy
     }
 
+    /// The policy in force for Milestone 5.
+    ///
+    /// Process control operations are granted only when the daemon has
+    /// explicitly configured process control to be enabled. The specific
+    /// signal allow-list is enforced by `igrisd` at the protocol level.
+    pub fn milestone_five(writes_enabled: bool, process_control_enabled: bool) -> Self {
+        let mut policy = Self::milestone_four(writes_enabled);
+
+        if process_control_enabled {
+            policy.allow(igris_proto::OP_PROC_SIGNAL);
+        }
+
+        policy
+    }
+
     /// Allow an operation explicitly. Returns `true` if it was newly added.
     pub fn allow(&mut self, op: impl Into<String>) -> bool {
         self.allowed.insert(op.into())
