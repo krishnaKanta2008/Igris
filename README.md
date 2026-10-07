@@ -122,4 +122,6 @@ Socket and audit paths default to the shared locations documented in
 
 ## License
 
-Not yet decided. No license file is included at this stage.
+This project is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full license text.
+
+Copyright 2024-2025 Igris OS Contributors.
