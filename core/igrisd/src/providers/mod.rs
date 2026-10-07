@@ -7,7 +7,9 @@
 
 pub mod system_info;
 
+pub mod events;
 pub mod fs;
 pub mod process;
 
+pub use events::EventProvider;
 pub use system_info::{collect, CpuInfo, MemoryInfo, SystemInfo};

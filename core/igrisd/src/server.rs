@@ -18,7 +18,7 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -26,7 +26,7 @@ use std::time::Duration;
 use igris_permd::{Decision, Policy};
 use igris_proto::{
     error_code, read_frame, validate_request, write_response, ReadFrame, Request, Response,
-    MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE,
+    MAX_POLL_EVENTS, MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE,
 };
 
 use crate::audit::{now_rfc3339, AuditLog, AuditRecord, AuditResult};
@@ -34,6 +34,7 @@ use crate::config::Config;
 use crate::providers::fs;
 use crate::providers::process;
 use crate::providers::system_info;
+use crate::providers::EventProvider;
 
 /// Idle timeout for a single connection.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -49,6 +50,8 @@ struct Shared {
     fs_root: PathBuf,
     /// Canonical paths explicitly permitted for filesystem writes/deletes.
     writable_paths: Vec<PathBuf>,
+    /// Event provider for stateful event observation.
+    events: Arc<EventProvider>,
 }
 
 /// The daemon listener and its shared state.
@@ -57,6 +60,7 @@ pub struct Server {
     socket_path: PathBuf,
     shared: Shared,
     running: Arc<AtomicBool>,
+    next_connection_id: AtomicU64,
 }
 
 impl Server {
@@ -110,6 +114,8 @@ impl Server {
             }
         }
 
+        let events = Arc::new(EventProvider::new(&fs_root));
+
         Ok(Self {
             listener,
             socket_path: config.socket_path.clone(),
@@ -118,8 +124,10 @@ impl Server {
                 audit: Arc::new(Mutex::new(audit)),
                 fs_root,
                 writable_paths,
+                events,
             },
             running: Arc::new(AtomicBool::new(true)),
+            next_connection_id: AtomicU64::new(1),
         })
     }
 
@@ -139,8 +147,9 @@ impl Server {
             match self.listener.accept() {
                 Ok((stream, _)) => {
                     let shared = self.shared.clone();
+                    let connection_id = self.next_connection_id.fetch_add(1, Ordering::Relaxed);
                     thread::spawn(move || {
-                        if let Err(e) = serve_stream(stream, &shared) {
+                        if let Err(e) = serve_stream(stream, &shared, connection_id) {
                             eprintln!("igrisd: connection error: {e}");
                         }
                     });
@@ -173,59 +182,71 @@ fn remove_stale_socket(path: &Path) -> io::Result<()> {
 }
 
 /// Serve one client connection until it disconnects or a fatal error occurs.
-fn serve_stream(mut stream: UnixStream, shared: &Shared) -> io::Result<()> {
+fn serve_stream(mut stream: UnixStream, shared: &Shared, connection_id: u64) -> io::Result<()> {
     stream.set_read_timeout(Some(CONNECTION_TIMEOUT))?;
     stream.set_write_timeout(Some(CONNECTION_TIMEOUT))?;
     let peer = stream.peer_addr().ok().map(|a| format!("{a:?}"));
 
-    loop {
-        let frame = match read_frame(&mut stream, MAX_REQUEST_SIZE) {
-            Ok(frame) => frame,
-            Err(ref e)
-                if e.kind() == io::ErrorKind::WouldBlock
-                    || e.kind() == io::ErrorKind::TimedOut
-                    || e.kind() == io::ErrorKind::ConnectionReset =>
-            {
-                return Ok(());
-            }
-            Err(e) => return Err(e),
-        };
-
-        match frame {
-            ReadFrame::Closed => return Ok(()),
-            ReadFrame::TooLarge { declared } => {
-                record(
-                    shared,
-                    &peer,
-                    None,
-                    None,
-                    Decision::Deny,
-                    AuditResult::Error,
-                );
-                let response = Response::error(
-                    None,
-                    error_code::TOO_LARGE,
-                    format!(
-                        "request declared {declared} bytes, exceeding the {MAX_REQUEST_SIZE}-byte maximum"
-                    ),
-                );
-                // The stream cannot be resynchronised after skipping a body.
-                let _ = write_response(&mut stream, &response, MAX_RESPONSE_SIZE);
-                return Ok(());
-            }
-            ReadFrame::Received(bytes) => {
-                let response = handle_payload(&bytes, shared, &peer);
-                if write_response(&mut stream, &response, MAX_RESPONSE_SIZE).is_err() {
-                    // Client disconnected before reading the response.
+    let result = (|| {
+        loop {
+            let frame = match read_frame(&mut stream, MAX_REQUEST_SIZE) {
+                Ok(frame) => frame,
+                Err(ref e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut
+                        || e.kind() == io::ErrorKind::ConnectionReset =>
+                {
                     return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
+
+            match frame {
+                ReadFrame::Closed => return Ok(()),
+                ReadFrame::TooLarge { declared } => {
+                    record(
+                        shared,
+                        &peer,
+                        None,
+                        None,
+                        Decision::Deny,
+                        AuditResult::Error,
+                    );
+                    let response = Response::error(
+                        None,
+                        error_code::TOO_LARGE,
+                        format!(
+                            "request declared {declared} bytes, exceeding the {MAX_REQUEST_SIZE}-byte maximum"
+                        ),
+                    );
+                    // The stream cannot be resynchronised after skipping a body.
+                    let _ = write_response(&mut stream, &response, MAX_RESPONSE_SIZE);
+                    return Ok(());
+                }
+                ReadFrame::Received(bytes) => {
+                    let response = handle_payload(&bytes, shared, &peer, connection_id);
+                    if write_response(&mut stream, &response, MAX_RESPONSE_SIZE).is_err() {
+                        // Client disconnected before reading the response.
+                        return Ok(());
+                    }
                 }
             }
         }
-    }
+    })();
+
+    // Clean up event watches owned by this connection on disconnect.
+    shared.events.cleanup_connection(connection_id);
+
+    result
 }
 
 /// Parse, validate, authorize, and execute one request payload.
-fn handle_payload(bytes: &[u8], shared: &Shared, peer: &Option<String>) -> Response {
+fn handle_payload(
+    bytes: &[u8],
+    shared: &Shared,
+    peer: &Option<String>,
+    connection_id: u64,
+) -> Response {
     let request: Request = match serde_json::from_slice(bytes) {
         Ok(request) => request,
         Err(e) => {
@@ -290,6 +311,8 @@ fn handle_payload(bytes: &[u8], shared: &Shared, peer: &Option<String>) -> Respo
         &request.params,
         &shared.fs_root,
         &shared.writable_paths,
+        &shared.events,
+        connection_id,
     ) {
         Ok(result) => {
             record(
@@ -326,6 +349,8 @@ fn dispatch(
     params: &serde_json::Value,
     fs_root: &Path,
     writable_paths: &[PathBuf],
+    events: &Arc<EventProvider>,
+    connection_id: u64,
 ) -> Result<serde_json::Value, DispatchFailure> {
     match op {
         igris_proto::OP_SYSTEM_INFO => {
@@ -414,6 +439,67 @@ fn dispatch(
                 denied: false,
             })
         }
+        igris_proto::OP_EVENTS_WATCH => {
+            let path = params
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or(DispatchFailure {
+                    code: error_code::BAD_REQUEST,
+                    message: "missing required `path`",
+                    denied: true,
+                })?;
+            let result = events
+                .watch(connection_id, path)
+                .map_err(DispatchFailure::from)?;
+            serde_json::to_value(result).map_err(|_| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: "failed to encode events.watch result",
+                denied: false,
+            })
+        }
+        igris_proto::OP_EVENTS_POLL => {
+            let watch_id =
+                params
+                    .get("watch_id")
+                    .and_then(|v| v.as_u64())
+                    .ok_or(DispatchFailure {
+                        code: error_code::BAD_REQUEST,
+                        message: "missing required `watch_id`",
+                        denied: true,
+                    })?;
+            let max = params
+                .get("max")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize)
+                .unwrap_or(MAX_POLL_EVENTS);
+            let result = events
+                .poll(connection_id, watch_id, max)
+                .map_err(DispatchFailure::from)?;
+            serde_json::to_value(result).map_err(|_| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: "failed to encode events.poll result",
+                denied: false,
+            })
+        }
+        igris_proto::OP_EVENTS_UNWATCH => {
+            let watch_id =
+                params
+                    .get("watch_id")
+                    .and_then(|v| v.as_u64())
+                    .ok_or(DispatchFailure {
+                        code: error_code::BAD_REQUEST,
+                        message: "missing required `watch_id`",
+                        denied: true,
+                    })?;
+            let result = events
+                .unwatch(connection_id, watch_id)
+                .map_err(DispatchFailure::from)?;
+            serde_json::to_value(result).map_err(|_| DispatchFailure {
+                code: error_code::INTERNAL,
+                message: "failed to encode events.unwatch result",
+                denied: false,
+            })
+        }
         _other => Err(DispatchFailure {
             code: error_code::UNKNOWN_OPERATION,
             message: "unsupported operation",
@@ -483,6 +569,9 @@ fn record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::EventProvider;
+    use std::path::Path;
+    use std::sync::Arc;
 
     #[test]
     fn writable_paths_must_remain_inside_fs_root() {
@@ -538,11 +627,14 @@ mod tests {
 
     #[test]
     fn dispatch_returns_system_info() {
+        let events = Arc::new(EventProvider::new(Path::new("/tmp")));
         let value = dispatch(
             igris_proto::OP_SYSTEM_INFO,
             &serde_json::json!({}),
             Path::new("/"),
             &[],
+            &events,
+            0,
         )
         .expect("system.info dispatches");
         assert!(value.get("hostname").is_some());
@@ -551,6 +643,15 @@ mod tests {
 
     #[test]
     fn dispatch_rejects_unknown_operation() {
-        assert!(dispatch("fs.write", &serde_json::json!({}), Path::new("/"), &[],).is_err());
+        let events = Arc::new(EventProvider::new(Path::new("/tmp")));
+        assert!(dispatch(
+            "fs.write",
+            &serde_json::json!({}),
+            Path::new("/"),
+            &[],
+            &events,
+            0
+        )
+        .is_err());
     }
 }

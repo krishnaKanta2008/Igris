@@ -11,7 +11,8 @@ fn main() -> ExitCode {
     let config = Config::from_env();
     let writes_enabled = !config.writable_paths.is_empty();
     let process_control_enabled = config.process_control_enabled;
-    let policy = Policy::milestone_five(writes_enabled, process_control_enabled);
+    let events_enabled = config.events_enabled;
+    let policy = Policy::milestone_six(writes_enabled, process_control_enabled, events_enabled);
 
     let server = match Server::bind(&config, policy) {
         Ok(server) => Arc::new(server),

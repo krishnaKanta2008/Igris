@@ -116,6 +116,26 @@ impl Policy {
         policy
     }
 
+    /// The policy in force for Milestone 6.
+    ///
+    /// Event observation operations are granted only when the daemon has
+    /// explicitly configured event observation to be enabled.
+    pub fn milestone_six(
+        writes_enabled: bool,
+        process_control_enabled: bool,
+        events_enabled: bool,
+    ) -> Self {
+        let mut policy = Self::milestone_five(writes_enabled, process_control_enabled);
+
+        if events_enabled {
+            policy.allow(igris_proto::OP_EVENTS_WATCH);
+            policy.allow(igris_proto::OP_EVENTS_POLL);
+            policy.allow(igris_proto::OP_EVENTS_UNWATCH);
+        }
+
+        policy
+    }
+
     /// Allow an operation explicitly. Returns `true` if it was newly added.
     pub fn allow(&mut self, op: impl Into<String>) -> bool {
         self.allowed.insert(op.into())

@@ -7,6 +7,8 @@
 //! - `IGRIS_AUDIT_LOG`      — append-only audit log file.
 //! - `IGRIS_FS_ROOT`        — canonical root for filesystem tools.
 //! - `IGRIS_WRITABLE_PATHS` — colon-separated paths permitted for writes/deletes.
+//! - `IGRIS_PROCESS_CONTROL` — when set to a truthy value, enables `proc.signal`.
+//! - `IGRIS_EVENTS` — when set to a truthy value, enables event observation (`events.*`).
 //!
 //! The writable path list defaults to empty. An empty list means filesystem
 //! writes and deletes remain unavailable.
@@ -36,6 +38,10 @@ pub struct Config {
     /// When `true`, process control operations (e.g. `proc.signal`) are
     /// permitted by policy. Defaults to `false` (default-deny).
     pub process_control_enabled: bool,
+
+    /// When `true`, event observation operations (e.g. `events.watch`) are
+    /// permitted by policy. Defaults to `false` (default-deny).
+    pub events_enabled: bool,
 }
 
 impl Config {
@@ -71,6 +77,13 @@ impl Config {
                     s != "0" && s != "false"
                 })
                 .unwrap_or(false),
+
+            events_enabled: std::env::var_os("IGRIS_EVENTS")
+                .map(|v| {
+                    let s = v.to_string_lossy();
+                    s != "0" && s != "false"
+                })
+                .unwrap_or(false),
         }
     }
 
@@ -84,6 +97,7 @@ impl Config {
             fs_root: default_fs_root(),
             writable_paths: Vec::new(),
             process_control_enabled: false,
+            events_enabled: false,
         }
     }
 
@@ -102,6 +116,7 @@ impl Config {
             fs_root: fs_root.into(),
             writable_paths: Vec::new(),
             process_control_enabled: false,
+            events_enabled: false,
         }
     }
 
@@ -118,6 +133,7 @@ impl Config {
             fs_root: fs_root.into(),
             writable_paths: writable_paths.into_iter().map(Into::into).collect(),
             process_control_enabled: false,
+            events_enabled: false,
         }
     }
 }

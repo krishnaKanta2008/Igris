@@ -463,6 +463,37 @@ pub struct ErrorBody {
     pub message: String,
 }
 
+/// Event object returned by `events.poll`.
+///
+/// Fields are bounded: `name` ≤ `MAX_EVENT_NAME`, `path` is a canonical
+/// absolute path within the filesystem root, `kind` is optional and
+/// limited to known filesystem types.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Event {
+    /// Event name (e.g., "fs.create", "fs.delete", "fs.modify").
+    pub name: String,
+    /// Canonical absolute path of the affected filesystem entry.
+    pub path: String,
+    /// Unix timestamp (seconds since epoch) when the event was observed.
+    pub timestamp_unix: u64,
+    /// Optional kind of the affected entry.
+    pub kind: Option<String>,
+}
+
+/// `events.watch` result payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WatchResult {
+    /// Assigned watch identifier (1..=MAX_EVENT_WATCHES).
+    pub watch_id: u64,
+}
+
+/// `events.poll` result payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PollResult {
+    /// Events drained from the watch queue.
+    pub events: Vec<Event>,
+}
+
 impl Response {
     /// Build a successful response.
     pub fn success(id: String, result: serde_json::Value) -> Self {
