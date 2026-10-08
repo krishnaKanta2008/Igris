@@ -101,7 +101,7 @@
     {
       "group": "Guides",
       "pages": [
-        "guides/quick-start",
+        "quick-start",
         "guides/configuration",
         "guides/running-daemon",
         "guides/using-igrisctl",
