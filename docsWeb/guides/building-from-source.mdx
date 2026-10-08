@@ -1,0 +1,588 @@
+---
+title: "Building from Source"
+description: "Complete guide to building Igris OS from source code"
+---
+
+# Building from Source
+
+## Prerequisites
+
+### System Requirements
+
+| Component | Minimum Version | Recommended |
+|-----------|----------------|-------------|
+| Linux / WSL2 | Kernel 5.10+ | Kernel 6.1+ |
+| Rust | 1.75+ (pinned) | Via rustup |
+| Python | 3.10+ | 3.11+ |
+| GCC | 11+ | 13+ |
+| CMake | 3.20+ | 3.25+ |
+| pkg-config | 0.29+ | Latest |
+
+### Ubuntu / Debian / WSL2
+
+```bash
+# Update package list
+sudo apt update
+
+# Install build dependencies
+sudo apt install -y \
+    build-essential \
+    pkg-config \
+    cmake \
+    libssl-dev \
+    libclang-dev \
+    python3 \
+    python3-venv \
+    python3-pip \
+    git \
+    curl
+
+# Install Rust via rustup
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+
+# Verify versions
+rustc --version
+cargo --version
+python3 --version
+cmake --version
+```
+
+### Fedora / RHEL
+
+```bash
+sudo dnf install -y \
+    gcc gcc-c++ make \
+    pkg-config cmake \
+    openssl-devel clang-devel \
+    python3 python3-virtualenv \
+    git curl
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+```
+
+### Arch Linux
+
+```bash
+sudo pacman -S --needed \
+    base-devel pkg-config cmake \
+    openssl clang \
+    python python-virtualenv \
+    git curl
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+```
+
+### macOS (Development Only)
+
+```bash
+# Install Xcode Command Line Tools
+xcode-select --install
+
+# Homebrew dependencies
+brew install pkg-config cmake openssl llvm python3 git
+
+# Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+source "$HOME/.cargo/env"
+
+# Note: Igris OS daemon requires Linux. macOS build for CLI tools only.
+```
+
+---
+
+## Clone Repository
+
+```bash
+git clone https://github.com/igris-os/igris.git
+cd igris
+
+# Verify rust toolchain
+cat rust-toolchain.toml
+# Should match installed version
+```
+
+---
+
+## Build Rust Workspace
+
+### Debug Build (Development)
+
+```bash
+# Build all crates
+cargo build --workspace
+
+# Build specific crate
+cargo build -p igrisd
+cargo build -p igrisctl
+cargo build -p igris-permd
+
+# Binaries at:
+# ./target/debug/igrisd
+# ./target/debug/igrisctl
+# ./target/debug/igris-permd
+```
+
+### Release Build (Production)
+
+```bash
+# Optimized build
+cargo build --release --workspace
+
+# Binaries at:
+# ./target/release/igrisd
+# ./target/release/igrisctl
+# ./target/release/igris-permd
+
+# Strip symbols (smaller binaries)
+strip target/release/igrisd
+strip target/release/igrisctl
+strip target/release/igris-permd
+```
+
+### Build with Features
+
+```bash
+# Default features only
+cargo build --workspace
+
+# All features (if any optional)
+cargo build --workspace --all-features
+
+# Specific features
+cargo build -p igrisd --features "feature-name"
+```
+
+---
+
+## Testing
+
+### Rust Tests
+
+```bash
+# All tests
+cargo test --workspace
+
+# Specific crate
+cargo test -p igrisd
+cargo test -p igris-permd
+
+# With output
+cargo test --workspace -- --nocapture
+
+# Specific test
+cargo test -p igrisd test_fs_read
+
+# Integration tests
+cargo test --test integration_test
+```
+
+### Python Agent Tests
+
+```bash
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install in development mode
+pip install -e ./agent
+
+# Run tests
+python3 -m unittest discover -s agent/tests -v
+
+# Or with pytest (if configured)
+pytest agent/tests -v
+```
+
+### Code Quality
+
+```bash
+# Format check
+cargo fmt --all -- --check
+
+# Auto-format
+cargo fmt --all
+
+# Clippy lints
+cargo clippy --workspace -- -D warnings
+
+# All checks (CI pipeline)
+cargo fmt --all -- --check && cargo clippy --workspace -- -D warnings && cargo test --workspace
+```
+
+---
+
+## Cross-Compilation
+
+### Linux Targets
+
+```bash
+# Add targets
+rustup target add x86_64-unknown-linux-musl
+rustup target add aarch64-unknown-linux-gnu
+
+# Install cross-compilation toolchains
+# Ubuntu: sudo apt install gcc-aarch64-linux-gnu musl-tools
+
+# Build for musl (static)
+cargo build --release --target x86_64-unknown-linux-musl
+
+# Build for ARM64
+cargo build --release --target aarch64-unknown-linux-gnu
+```
+
+### Using cross (Docker-based)
+
+```bash
+# Install cross
+cargo install cross
+
+# Build for any target
+cross build --release --target aarch64-unknown-linux-gnu
+cross build --release --target x86_64-unknown-linux-musl
+```
+
+---
+
+## Development Workflow
+
+### Typical Edit-Build-Test Cycle
+
+```bash
+# 1. Make changes
+vim core/igrisd/src/main.rs
+
+# 2. Quick check (fast)
+cargo check -p igrisd
+
+# 3. Build and test
+cargo build -p igrisd
+cargo test -p igrisd
+
+# 4. Run manually
+./target/debug/igrisd
+```
+
+### Using cargo-watch
+
+```bash
+# Install
+cargo install cargo-watch
+
+# Auto-rebuild on changes
+cargo watch -x "build -p igrisd" -x "test -p igrisd"
+
+# Auto-run daemon on changes
+cargo watch -x "run -p igrisd"
+```
+
+### Pre-commit Hooks
+
+```bash
+# Install pre-commit
+pip install pre-commit
+pre-commit install
+
+# Run manually
+pre-commit run --all-files
+```
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/doublify/pre-commit-rust
+    rev: v1.0
+    hooks:
+      - id: fmt
+      - id: clippy
+      - id: cargo-check
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+```
+
+---
+
+## IDE Setup
+
+### VS Code (Recommended)
+
+```json
+// .vscode/settings.json
+{
+    "rust-analyzer.linkedProjects": ["Cargo.toml"],
+    "rust-analyzer.checkOnSave.command": "clippy",
+    "rust-analyzer.cargo.allFeatures": true,
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+        "source.fixAll": "explicit"
+    },
+    "[rust]": {
+        "editor.defaultFormatter": "rust-lang.rust-analyzer"
+    }
+}
+```
+
+```json
+// .vscode/launch.json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug igrisd",
+            "program": "${workspaceFolder}/target/debug/igrisd",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "IGRIS_FS_ROOT": "${env:HOME}/.igris/share",
+                "RUST_LOG": "debug"
+            }
+        }
+    ]
+}
+```
+
+### Recommended Extensions
+
+- `rust-lang.rust-analyzer` — Rust language server
+- `vadimcn.vscode-lldb` — Debugger
+- `tamasfe.even-better-toml` — TOML support
+- `usernamehw.errorlens` — Inline errors
+
+### Neovim (nvim-lspconfig)
+
+```lua
+-- lspconfig setup
+require('lspconfig').rust_analyzer.setup({
+    settings = {
+        ['rust-analyzer'] = {
+            checkOnSave = { command = "clippy" },
+            cargo = { allFeatures = true },
+        }
+    }
+})
+```
+
+---
+
+## CI/CD Pipeline
+
+### GitHub Actions (Reference)
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      
+      - name: Run clippy
+        run: cargo clippy --workspace -- -D warnings
+      
+      - name: Build
+        run: cargo build --workspace
+      
+      - name: Test
+        run: cargo test --workspace
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install agent
+        run: pip install -e ./agent
+      - name: Test
+        run: python3 -m unittest discover -s agent/tests
+```
+
+---
+
+## Docker Build
+
+### Multi-stage Build
+
+```dockerfile
+# Dockerfile
+# Stage 1: Build
+FROM rust:1.78-bookworm AS builder
+
+WORKDIR /app
+COPY . .
+
+# Install build deps
+RUN apt-get update && apt-get install -y \
+    pkg-config cmake libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build release
+RUN cargo build --release --workspace
+
+# Stage 2: Runtime
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create user
+RUN useradd -r -s /bin/false igris
+
+# Copy binaries
+COPY --from=builder /app/target/release/igrisd /usr/local/bin/
+COPY --from=builder /app/target/release/igrisctl /usr/local/bin/
+COPY --from=builder /app/target/release/igris-permd /usr/local/bin/
+
+# Create directories
+RUN mkdir -p /var/lib/igris/share/writable /var/log/igris /run/igris \
+    && chown -R igris:igris /var/lib/igris /var/log/igris /run/igris
+
+USER igris
+
+ENV IGRIS_SOCKET_PATH=/run/igris/igrisd.sock \
+    IGRIS_AUDIT_LOG=/var/log/igris/audit.log \
+    IGRIS_FS_ROOT=/var/lib/igris/share \
+    IGRIS_WRITABLE_PATHS=/var/lib/igris/share/writable \
+    IGRIS_PROCESS_CONTROL=true \
+    IGRIS_EVENTS=true
+
+EXPOSE 8080
+
+CMD ["igrisd"]
+```
+
+```bash
+# Build
+docker build -t igris-os:latest .
+
+# Run
+docker run -d \
+  --name igrisd \
+  -v igris-data:/var/lib/igris \
+  -v igris-logs:/var/log/igris \
+  -v igris-run:/run/igris \
+  igris-os:latest
+```
+
+---
+
+## Troubleshooting Build Issues
+
+### Rust Version Mismatch
+
+```bash
+# Check required version
+cat rust-toolchain.toml
+
+# Install specific version
+rustup install 1.78.0
+rustup default 1.78.0
+```
+
+### Missing OpenSSL
+
+```bash
+# Ubuntu/Debian
+sudo apt install libssl-dev pkg-config
+
+# Fedora
+sudo dnf install openssl-devel pkg-config
+
+# macOS
+brew install openssl pkg-config
+export OPENSSL_DIR=$(brew --prefix openssl)
+```
+
+### Linker Errors
+
+```bash
+# Use mold (faster linker)
+cargo install cargo-mold
+cargo mold build --release
+
+# Or use lld
+export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
+cargo build --release
+```
+
+### Out of Memory During Build
+
+```bash
+# Limit parallel jobs
+export CARGO_BUILD_JOBS=4
+cargo build --release
+
+# Or use swap
+sudo fallocate -l 4G /swapfile
+sudo chmod 600 /swapfile
+sudo mkswap /swapfile
+sudo swapon /swapfile
+```
+
+---
+
+## Verification Checklist
+
+After building, verify:
+
+```bash
+#!/bin/bash
+# verify-build.sh
+
+echo "=== Build Verification ==="
+
+# Check binaries exist
+for bin in igrisd igrisctl igris-permd; do
+    if [ -f "target/release/$bin" ]; then
+        echo "✅ $bin exists"
+        ./target/release/$bin --version
+    else
+        echo "❌ $bin missing"
+        exit 1
+    fi
+done
+
+# Quick functionality test
+./target/release/igrisd --help 2>&1 | head -1
+./target/release/igrisctl --help 2>&1 | head -1
+
+# Run tests
+cargo test --workspace --quiet 2>&1 | tail -5
+
+echo "=== Verification Complete ==="
+```
+
+---
+
+## Related
+
+- [Development Setup](/development/setup) — Development environment
+- [Testing](/development/testing) — Test suite details
+- [Contributing](/development/contributing) — Contribution guidelines
+- [Quick Start](/quick-start) — Running the built binaries

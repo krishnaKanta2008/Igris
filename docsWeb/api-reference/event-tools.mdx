@@ -1,0 +1,389 @@
+---
+title: "Event Tools"
+description: "Reference for filesystem event observation: events.watch, events.poll, events.unwatch"
+---
+
+# Event Tools
+
+Event tools provide **filesystem event observation** via Linux `inotify`. Requires explicit capability enablement.
+
+## Capability
+
+| Tool | Capability | Environment Variable |
+|------|------------|---------------------|
+| `events.watch`, `events.poll`, `events.unwatch` | `event_observation` | `IGRIS_EVENTS=true` |
+
+## Prerequisites
+
+```bash
+# Start daemon with events enabled
+IGRIS_EVENTS=true ./target/debug/igrisd
+```
+
+Policy must grant `event_observation` capability.
+
+---
+
+## events.watch
+
+Register a filesystem event watch on a path.
+
+### Parameters
+
+```json
+{
+  "path": "/absolute/path/within/IGRIS_FS_ROOT"
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Absolute path to watch (file or directory) |
+
+### Response
+
+```json
+{
+  "watch_id": 1
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `watch_id` | integer | Unique watch identifier (per connection) |
+
+### Constraints
+
+- Path must be within `IGRIS_FS_ROOT` (canonicalized)
+- Maximum **16 watches per connection** (`MAX_EVENT_WATCHES`)
+- Directory watches are **non-recursive** (immediate children only)
+- Symlinks followed; target must be within root
+- Watch survives until `events.unwatch` or connection close
+
+### Errors
+
+- `-32001` — `event_observation` capability not enabled (`IGRIS_EVENTS`)
+- `-32002` — Path not within `IGRIS_FS_ROOT`
+- `-32004` — Watch limit reached (16 per connection)
+- `-32602` — Invalid path (not absolute, too long)
+
+---
+
+## events.poll
+
+Drain queued events from a watch (non-blocking).
+
+### Parameters
+
+```json
+{
+  "watch_id": 1,
+  "max": 10
+}
+```
+
+| Parameter | Type | Required | Default | Max | Description |
+|-----------|------|----------|---------|-----|-------------|
+| `watch_id` | integer | Yes | — | — | Watch ID from `events.watch` |
+| `max` | integer | No | 10 | 100 | Maximum events to return |
+
+### Response
+
+```json
+{
+  "events": [
+    {
+      "watch_id": 1,
+      "path": "/home/user/.igris/share/file.txt",
+      "mask": "IN_MODIFY",
+      "cookie": 0
+    },
+    {
+      "watch_id": 1,
+      "path": "/home/user/.igris/share/file.txt",
+      "mask": "IN_ATTRIB",
+      "cookie": 0
+    }
+  ],
+  "dropped": 0
+}
+```
+
+### Event Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `watch_id` | integer | Originating watch ID |
+| `path` | string | Absolute path of affected file |
+| `mask` | string | Event type (see below) |
+| `cookie` | integer | Rename correlation ID (0 if not rename) |
+
+### Dropped Counter
+
+- `dropped`: Number of events lost due to queue overflow
+- Non-zero indicates polling too slowly or event burst
+
+### Errors
+
+- `-32001` — `event_observation` capability not enabled
+- `-32005` — Watch not found or not owned by this connection
+- `-32602` — Invalid `max` (negative or > 100)
+
+---
+
+## events.unwatch
+
+Remove a watch by ID.
+
+### Parameters
+
+```json
+{
+  "watch_id": 1
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `watch_id` | integer | Yes | Watch ID to remove |
+
+### Response
+
+```json
+{
+  "unwatched": true
+}
+```
+
+### Errors
+
+- `-32001` — `event_observation` capability not enabled
+- `-32005` — Watch not found or not owned by this connection
+
+---
+
+## Event Masks
+
+| Mask | Description |
+|------|-------------|
+| `IN_ACCESS` | File was accessed (read) |
+| `IN_MODIFY` | File was modified (write) |
+| `IN_ATTRIB` | Metadata changed (permissions, timestamps, etc.) |
+| `IN_CLOSE_WRITE` | File opened for writing was closed |
+| `IN_CLOSE_NOWRITE` | File opened read-only was closed |
+| `IN_OPEN` | File was opened |
+| `IN_MOVED_FROM` | File moved out of watched directory |
+| `IN_MOVED_TO` | File moved into watched directory |
+| `IN_CREATE` | Subfile created in watched directory |
+| `IN_DELETE` | Subfile deleted from watched directory |
+| `IN_DELETE_SELF` | Watched file/directory itself deleted |
+| `IN_MOVE_SELF` | Watched file/directory itself moved |
+
+### Rename Events
+
+Rename generates **two events** with same `cookie`:
+
+```json
+{ "watch_id": 1, "path": "/watchdir/old.txt", "mask": "IN_MOVED_FROM", "cookie": 123 }
+{ "watch_id": 1, "path": "/watchdir/new.txt", "mask": "IN_MOVED_TO", "cookie": 123 }
+```
+
+---
+
+## Limits
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `MAX_EVENT_WATCHES` | 16 | Watches per connection |
+| `MAX_QUEUED_EVENTS` | 256 | Total events across all watches |
+| `MAX_EVENTS_PER_WATCH` | 16 | Events per watch queue |
+| `MAX_POLL_EVENTS` | 100 | Max events per `events.poll` call |
+
+### Queue Behavior
+
+- Per-watch queue: **FIFO, max 16 events**
+- Global queue: **Max 256 events total**
+- On overflow: **Oldest event dropped**, `dropped` counter incremented
+- `events.poll` **never blocks** — returns immediately with available events
+
+---
+
+## Complete Example
+
+### Raw JSON (via socket)
+
+```bash
+# 1. Handshake
+{"jsonrpc":"2.0","method":"hello","params":{"version":1,"client":"test"}}
+
+# 2. Create watch
+{"jsonrpc":"2.0","id":1,"method":"events.watch","params":{"path":"/home/user/.igris/share/monitor"}}
+
+# Response: {"jsonrpc":"2.0","id":1,"result":{"watch_id":1}}
+
+# 3. Poll for events
+{"jsonrpc":"2.0","id":2,"method":"events.poll","params":{"watch_id":1,"max":10}}
+
+# Response: {"jsonrpc":"2.0","id":2,"result":{"events":[...],"dropped":0}}
+
+# 4. Remove watch
+{"jsonrpc":"2.0","id":3,"method":"events.unwatch","params":{"watch_id":1}}
+
+# Response: {"jsonrpc":"2.0","id":3,"result":{"unwatched":true}}
+```
+
+### Python Client
+
+```python
+import json
+import socket
+import struct
+
+class EventClient:
+    def __init__(self, socket_path):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect(socket_path)
+        self._handshake()
+        self.request_id = 0
+    
+    def _handshake(self):
+        hello = {"jsonrpc": "2.0", "method": "hello", "params": {"version": 1, "client": "event-client"}}
+        self._send(hello)
+        self._recv()
+    
+    def _send(self, msg):
+        data = json.dumps(msg).encode('utf-8')
+        self.sock.sendall(struct.pack('>I', len(data)))
+        self.sock.sendall(data)
+    
+    def _recv(self):
+        len_bytes = self.sock.recv(4)
+        length = struct.unpack('>I', len_bytes)[0]
+        data = b''
+        while len(data) < length:
+            data += self.sock.recv(length - len(data))
+        return json.loads(data.decode('utf-8'))
+    
+    def call(self, method, params):
+        self.request_id += 1
+        request = {"jsonrpc": "2.0", "id": self.request_id, "method": method, "params": params}
+        self._send(request)
+        return self._recv()
+    
+    def watch(self, path):
+        return self.call("events.watch", {"path": path})
+    
+    def poll(self, watch_id, max_events=10):
+        return self.call("events.poll", {"watch_id": watch_id, "max": max_events})
+    
+    def unwatch(self, watch_id):
+        return self.call("events.unwatch", {"watch_id": watch_id})
+
+# Usage
+client = EventClient("/run/user/1000/igris/igrisd.sock")
+result = client.watch("/home/user/.igris/share/monitor")
+watch_id = result["result"]["watch_id"]
+print(f"Watch ID: {watch_id}")
+
+# Poll loop
+import time
+while True:
+    result = client.poll(watch_id)
+    for event in result["result"]["events"]:
+        print(f"  {event['mask']}: {event['path']}")
+    if result["result"]["dropped"] > 0:
+        print(f"  ⚠️  {result['result']['dropped']} events dropped")
+    time.sleep(1)
+```
+
+---
+
+## igrisctl Support
+
+<Note>
+**Not yet implemented:** `igrisctl` does not provide commands for event operations.
+Use raw JSON requests via the Unix socket or a custom client.
+</Note>
+
+---
+
+## Behavior Details
+
+### Watch Path Semantics
+
+| Path Type | Behavior |
+|-----------|----------|
+| Regular file | Events on that file only |
+| Directory | Events on immediate children (non-recursive) |
+| Symlink to file | Follows link, watches target file |
+| Symlink to directory | Follows link, watches target directory |
+
+### Connection Lifecycle
+
+| Event | Watches |
+|-------|---------|
+| Connect | Empty watch set |
+| `events.watch` | Added to connection's watch set |
+| `events.unwatch` | Removed from set, inotify watch removed |
+| Disconnect | **All watches auto-removed**, queues freed |
+| Daemon restart | All state lost |
+
+### Event Delivery Guarantees
+
+| Property | Guarantee |
+|----------|-----------|
+| Ordering | Per-watch FIFO |
+| Delivery | Best-effort (bounded queue) |
+| Duplicates | Possible (kernel may duplicate) |
+| Coalescing | None (raw inotify events) |
+| Overflow | Oldest dropped, counter incremented |
+
+---
+
+## Troubleshooting
+
+### No Events Received
+
+```bash
+# Verify daemon started with IGRIS_EVENTS=true
+ps aux | grep igrisd
+
+# Check path is within IGRIS_FS_ROOT
+echo $IGRIS_FS_ROOT
+
+# Verify inotify watches in kernel
+ls -la /proc/$(pidof igrisd)/fd/ | grep inotify
+```
+
+### Events Dropped
+
+- Poll more frequently
+- Reduce `max` per poll to drain faster
+- Monitor `dropped` field in response
+
+### Watch Creation Fails
+
+- Check 16-watch limit per connection
+- Verify path canonicalization
+- Ensure `IGRIS_FS_ROOT` includes the path
+
+---
+
+## Not Yet Implemented
+
+- ❌ Process event observation (`proc.exec`, `proc.exit`, `proc.fork`)
+- ❌ Streaming IPC / WebSocket push notifications
+- ❌ Event filtering (regex, mask filter, field projection)
+- ❌ Recursive directory watches
+- ❌ `igrisctl` commands for events
+- ❌ Persistent event log (use external collector)
+
+---
+
+## Related
+
+- [Event System](/core-concepts/event-system) — Architecture overview
+- [IPC Protocol](/core-concepts/ipc-protocol) — Wire protocol
+- [Security Model](/core-concepts/security-model) — Capability gating
+- [Configuration](/guides/configuration) — `IGRIS_EVENTS`
+- [ADR 0008](/adr/0008-process-observation-and-proc-boundary) — Events boundary decision

@@ -1,0 +1,490 @@
+---
+title: "Development Setup"
+description: "Set up your development environment for contributing to Igris OS"
+---
+
+# Development Setup
+
+This guide covers setting up a complete development environment for Igris OS.
+
+## Prerequisites
+
+See [Building from Source](/guides/building-from-source#prerequisites) for system requirements.
+
+## Quick Setup Script
+
+```bash
+#!/bin/bash
+# setup-dev.sh - Run this to set up everything
+
+set -euo pipefail
+
+echo "=== Igris OS Development Setup ==="
+
+# 1. Install system dependencies
+echo "Installing system dependencies..."
+if command -v apt &> /dev/null; then
+    sudo apt update
+    sudo apt install -y build-essential pkg-config cmake libssl-dev libclang-dev python3 python3-venv python3-pip git curl
+elif command -v dnf &> /dev/null; then
+    sudo dnf install -y gcc gcc-c++ make pkg-config cmake openssl-devel clang-devel python3 python3-virtualenv git curl
+elif command -v pacman &> /dev/null; then
+    sudo pacman -S --needed base-devel pkg-config cmake openssl clang python python-virtualenv git curl
+else
+    echo "Unsupported package manager. Install dependencies manually."
+fi
+
+# 2. Install Rust
+echo "Installing Rust..."
+if ! command -v rustc &> /dev/null; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+fi
+
+# 3. Install pinned toolchain
+echo "Setting up Rust toolchain..."
+rustup toolchain install $(cat rust-toolchain.toml | grep channel | cut -d'"' -f2)
+rustup component add rustfmt clippy
+
+# 4. Clone repository (if not already)
+if [ ! -d "igris" ]; then
+    git clone https://github.com/igris-os/igris.git
+fi
+cd igris
+
+# 5. Set up Python environment
+echo "Setting up Python environment..."
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ./agent
+
+# 6. Install development tools
+echo "Installing development tools..."
+cargo install cargo-watch cargo-nextest cargo-make
+
+# 7. Set up pre-commit hooks
+pip install pre-commit
+pre-commit install
+
+# 8. Build and test
+echo "Building and testing..."
+cargo build --workspace
+cargo test --workspace
+
+echo "=== Setup Complete ==="
+echo "Activate environment with: source .venv/bin/activate"
+echo "Run daemon with: ./target/debug/igrisd"
+```
+
+---
+
+## IDE Configuration
+
+### VS Code (Recommended)
+
+Install these extensions:
+- `rust-lang.rust-analyzer` — Rust language server
+- `vadimcn.vscode-lldb` — Debugging
+- `tamasfe.even-better-toml` — TOML support
+- `usernamehw.errorlens` — Inline diagnostics
+- `ms-python.python` — Python support
+
+```json
+// .vscode/settings.json
+{
+    "rust-analyzer.linkedProjects": ["Cargo.toml"],
+    "rust-analyzer.checkOnSave.command": "clippy",
+    "rust-analyzer.cargo.allFeatures": true,
+    "rust-analyzer.procMacro.enable": true,
+    "editor.formatOnSave": true,
+    "editor.codeActionsOnSave": {
+        "source.fixAll": "explicit"
+    },
+    "[rust]": {
+        "editor.defaultFormatter": "rust-lang.rust-analyzer"
+    },
+    "[toml]": {
+        "editor.defaultFormatter": "tamasfe.even-better-toml"
+    },
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+    "python.linting.enabled": true,
+    "python.linting.pylintEnabled": true
+}
+```
+
+```json
+// .vscode/launch.json
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug igrisd",
+            "program": "${workspaceFolder}/target/debug/igrisd",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "IGRIS_FS_ROOT": "${env:HOME}/.igris/share",
+                "IGRIS_WRITABLE_PATHS": "${env:HOME}/.igris/share/writable",
+                "IGRIS_PROCESS_CONTROL": "true",
+                "IGRIS_EVENTS": "true",
+                "RUST_LOG": "debug",
+                "RUST_BACKTRACE": "1"
+            },
+            "console": "integratedTerminal"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug igrisctl",
+            "program": "${workspaceFolder}/target/debug/igrisctl",
+            "args": ["system.info"],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_LOG": "debug"
+            },
+            "console": "integratedTerminal"
+        },
+        {
+            "type": "python",
+            "request": "launch",
+            "name": "Debug Agent Tests",
+            "module": "unittest",
+            "args": ["discover", "-s", "agent/tests"],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal"
+        }
+    ]
+}
+```
+
+### Neovim (with nvim-lspconfig)
+
+```lua
+-- init.lua or init.vim
+require('lspconfig').rust_analyzer.setup({
+    settings = {
+        ['rust-analyzer'] = {
+            checkOnSave = { command = "clippy" },
+            cargo = { allFeatures = true },
+            procMacro = { enable = true },
+        }
+    },
+    on_attach = function(client, bufnr)
+        -- Keybindings
+        vim.keymap.set('n', 'gd', vim.lsp.buf.definition, { buffer = bufnr })
+        vim.keymap.set('n', 'K', vim.lsp.buf.hover, { buffer = bufnr })
+        vim.keymap.set('n', '<leader>ca', vim.lsp.buf.code_action, { buffer = bufnr })
+    end
+})
+
+-- Debugging with nvim-dap
+require('dap').adapters.lldb = {
+    type = 'executable',
+    command = '/usr/bin/lldb-vscode',  -- or lldb-dap
+    name = 'lldb'
+}
+```
+
+### Helix Editor
+
+```toml
+# ~/.config/helix/languages.toml
+[[language]]
+name = "rust"
+roots = ["Cargo.toml"]
+language-servers = ["rust-analyzer"]
+
+[[language]]
+name = "python"
+roots = ["pyproject.toml", "setup.py", "requirements.txt"]
+language-servers = ["pyright"]
+```
+
+---
+
+## Development Workflow
+
+### Daily Commands
+
+```bash
+# Activate environment
+source .venv/bin/activate
+
+# Quick syntax check (fast)
+cargo check --workspace
+
+# Build specific crate
+cargo build -p igrisd
+
+# Run tests for specific crate
+cargo test -p igrisd
+
+# Run all tests
+cargo test --workspace
+
+# Format code
+cargo fmt --all
+
+# Lint
+cargo clippy --workspace -- -D warnings
+
+# Run daemon with debug logging
+RUST_LOG=debug ./target/debug/igrisd
+
+# Run client
+./target/debug/igrisctl system.info --json
+```
+
+### Using cargo-watch
+
+```bash
+# Install
+cargo install cargo-watch
+
+# Auto-test on save
+cargo watch -x "test -p igrisd" -x "test -p igris-permd"
+
+# Auto-build and run daemon
+cargo watch -x "run -p igrisd"
+
+# Clear screen on each run
+cargo watch -c -x "run -p igrisd"
+```
+
+### Using cargo-make
+
+```toml
+# Makefile.toml
+[tasks.dev]
+command = "cargo"
+args = ["watch", "-x", "run -p igrisd"]
+description = "Run daemon with auto-reload"
+
+[tasks.test]
+command = "cargo"
+args = ["test", "--workspace"]
+description = "Run all tests"
+
+[tasks.check]
+command = "cargo"
+args = ["fmt", "--all", "--", "--check"]
+description = "Check formatting"
+
+[tasks.lint]
+command = "cargo"
+args = ["clippy", "--workspace", "--", "-D", "warnings"]
+description = "Run clippy"
+
+[tasks.ci]
+dependencies = ["check", "lint", "test"]
+description = "Full CI pipeline"
+```
+
+```bash
+# Run tasks
+cargo make dev
+cargo make test
+cargo make ci
+```
+
+---
+
+## Project Structure
+
+```
+igris/
+├── Cargo.toml              # Workspace root
+├── Cargo.lock
+├── rust-toolchain.toml     # Pinned Rust version
+├── .editorconfig
+├── .gitignore
+├── LICENSE
+├── README.md
+├── docs/                   # Legacy docs (Markdown)
+├── docsWeb/                # Mintlify docs (this site)
+├── scripts/                # Helper scripts
+├── core/                   # Rust crates
+│   ├── igrisd/             # Core daemon
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── main.rs
+│   │       ├── ipc/        # IPC protocol
+│   │       ├── tools/      # Tool implementations
+│   │       ├── perm/       # Permission client
+│   │       └── audit/      # Audit logging
+│   ├── igrisctl/           # CLI client
+│   │   ├── Cargo.toml
+│   │   └── src/
+│   │       ├── main.rs
+│   │       └── commands/
+│   └── igris-permd/        # Permission broker
+│       ├── Cargo.toml
+│       └── src/
+│           ├── main.rs
+│           ├── policy/     # Policy engine
+│           └── server/     # IPC server
+├── agent/                  # Python AI agent
+│   ├── pyproject.toml
+│   ├── src/igris_agent/
+│   │   ├── __init__.py
+│   │   ├── orchestrator.py
+│   │   ├── memory.py
+│   │   └── models.py
+│   └── tests/
+└── target/                 # Build artifacts (gitignored)
+```
+
+---
+
+## Key Crates
+
+### Core Crates (in `core/`)
+
+| Crate | Purpose | Key Dependencies |
+|-------|---------|------------------|
+| `igrisd` | Main daemon | `tokio`, `serde`, `tracing` |
+| `igrisctl` | CLI client | `clap`, `serde_json` |
+| `igris-permd` | Permission broker | `tokio`, `toml` |
+
+### Shared Crates (if any)
+
+| Crate | Purpose |
+|-------|---------|
+| `igris-ipc` | IPC protocol types (shared) |
+| `igris-tools` | Tool definitions (shared) |
+| `igris-audit` | Audit log types (shared) |
+
+---
+
+## Environment Variables for Development
+
+```bash
+# .env.development (source this)
+export IGRIS_FS_ROOT=~/.igris/share
+export IGRIS_WRITABLE_PATHS=~/.igris/share/writable
+export IGRIS_PROCESS_CONTROL=true
+export IGRIS_EVENTS=true
+export IGRIS_POLICY=milestone_six
+export RUST_LOG=debug
+export RUST_BACKTRACE=1
+
+# Create directories
+mkdir -p "$IGRIS_FS_ROOT" "$IGRIS_WRITABLE_PATHS"
+```
+
+```bash
+# Usage
+source .env.development
+./target/debug/igrisd
+```
+
+---
+
+## Debugging Tips
+
+### Enable Backtraces
+
+```bash
+export RUST_BACKTRACE=1
+export RUST_LIB_BACKTRACE=1
+./target/debug/igrisd
+```
+
+### Logging Levels
+
+```bash
+# Debug everything
+RUST_LOG=debug ./target/debug/igrisd
+
+# Debug specific modules
+RUST_LOG=igrisd=debug,igris_ipc=trace ./target/debug/igrisd
+
+# Only warnings
+RUST_LOG=warn ./target/debug/igrisd
+```
+
+### Using gdb/lldb
+
+```bash
+# With gdb
+gdb --args ./target/debug/igrisd
+
+# With lldb
+lldb ./target/debug/igrisd
+
+# In debugger:
+# (gdb) run
+# (gdb) bt  # backtrace on crash
+# (lldb) process launch
+# (lldb) bt
+```
+
+### Profiling
+
+```bash
+# Install perf
+sudo apt install linux-perf
+
+# Record
+perf record -g ./target/release/igrisd
+
+# Report
+perf report
+
+# Or use cargo-flamegraph
+cargo install flamegraph
+cargo flamegraph -p igrisd
+```
+
+---
+
+## Common Issues
+
+### Rust Analyzer Not Working
+
+```bash
+# Restart Rust Analyzer
+# VS Code: Ctrl+Shift+P > "Rust Analyzer: Restart Server"
+
+# Or rebuild proc-macro cache
+rm -rf ~/.cache/rust-analyzer
+```
+
+### Linker Errors
+
+```bash
+# Use mold (faster)
+cargo install cargo-mold
+cargo mold build
+
+# Or lld
+export RUSTFLAGS="-C link-arg=-fuse-ld=lld"
+```
+
+### Out of Memory
+
+```bash
+# Limit parallel jobs
+export CARGO_BUILD_JOBS=4
+
+# Add swap
+sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+```
+
+### Python Import Errors
+
+```bash
+# Reinstall agent in dev mode
+pip install -e ./agent --force-reinstall --no-deps
+```
+
+---
+
+## Related
+
+- [Building from Source](/guides/building-from-source) — Build details
+- [Testing](/development/testing) — Test suite
+- [Contributing](/development/contributing) — Contribution guidelines
+- [Code Style](/development/code-style) — Coding standards

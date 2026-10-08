@@ -8,4 +8,5 @@
 pub mod audit;
 pub mod config;
 pub mod providers;
+pub mod sandboxed_providers;
 pub mod server;

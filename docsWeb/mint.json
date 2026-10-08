@@ -1,0 +1,146 @@
+{
+  "name": "Igris OS Documentation",
+  "description": "Documentation for Igris OS - A Linux-based, AI-native operating system environment",
+  "logo": {
+    "light": "/logo/light.svg",
+    "dark": "/logo/dark.svg"
+  },
+  "favicon": "/favicon.svg",
+  "colors": {
+    "primary": "#1a73e8",
+    "light": "#1a73e8",
+    "dark": "#8ab4f8",
+    "anchors": {
+      "from": "#1a73e8",
+      "to": "#8ab4f8"
+    }
+  },
+  "topbarLinks": [
+    {
+      "name": "GitHub",
+      "url": "https://github.com/igris-os/igris"
+    },
+    {
+      "name": "Discord",
+      "url": "https://discord.gg/igris-os"
+    }
+  ],
+  "topbarCtaButton": {
+    "name": "Get Started",
+    "url": "/getting-started"
+  },
+  "tabs": [
+    {
+      "name": "Core Concepts",
+      "url": "/core-concepts/architecture"
+    },
+    {
+      "name": "API Reference",
+      "url": "/api-reference/overview"
+    },
+    {
+      "name": "Guides",
+      "url": "/guides/quick-start"
+    },
+    {
+      "name": "Development",
+      "url": "/development/setup"
+    }
+  ],
+  "anchors": [
+    {
+      "name": "Documentation",
+      "icon": "book-open",
+      "url": "/introduction"
+    },
+    {
+      "name": "API Reference",
+      "icon": "code",
+      "url": "/api-reference/overview"
+    },
+    {
+      "name": "Architecture",
+      "icon": "layers",
+      "url": "/core-concepts/architecture"
+    },
+    {
+      "name": "Contributing",
+      "icon": "github",
+      "url": "/development/contributing"
+    }
+  ],
+  "navigation": [
+    {
+      "group": "Getting Started",
+      "pages": [
+        "introduction",
+        "getting-started",
+        "quick-start"
+      ]
+    },
+    {
+      "group": "Core Concepts",
+      "pages": [
+        "core-concepts/architecture",
+        "core-concepts/security-model",
+        "core-concepts/ipc-protocol",
+        "core-concepts/event-system"
+      ]
+    },
+    {
+      "group": "API Reference",
+      "pages": [
+        "api-reference/overview",
+        "api-reference/system-tools",
+        "api-reference/filesystem-tools",
+        "api-reference/process-tools",
+        "api-reference/event-tools",
+        "api-reference/permission-system"
+      ]
+    },
+    {
+      "group": "Guides",
+      "pages": [
+        "guides/quick-start",
+        "guides/configuration",
+        "guides/running-daemon",
+        "guides/using-igrisctl",
+        "guides/building-from-source",
+        "guides/writing-policies"
+      ]
+    },
+    {
+      "group": "Development",
+      "pages": [
+        "development/setup",
+        "development/testing",
+        "development/contributing",
+        "development/code-style",
+        "development/roadmap"
+      ]
+    },
+    {
+      "group": "Architecture Decision Records",
+      "pages": [
+        "adr/overview",
+        "adr/0001-record-architecture-decisions",
+        "adr/0002-use-rust-for-core-services",
+        "adr/0003-use-python-for-agent-layer",
+        "adr/0004-wsl2-as-development-environment",
+        "adr/0005-privilege-separation-and-default-deny",
+        "adr/0006-unix-socket-ipc-boundary",
+        "adr/0007-filesystem-boundary-and-read-only-tools",
+        "adr/0008-process-observation-and-proc-boundary"
+      ]
+    }
+  ],
+  "footerSocials": {
+    "github": "https://github.com/igris-os/igris",
+    "discord": "https://discord.gg/igris-os",
+    "twitter": "https://twitter.com/igris_os"
+  },
+  "version": "0.1.0",
+  "versioning": {
+    "mode": "single"
+  }
+}

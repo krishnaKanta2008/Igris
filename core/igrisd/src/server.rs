@@ -7,7 +7,7 @@
 //! 2. JSON parse,
 //! 3. protocol validation (version, id, params, supported operation),
 //! 4. permission decision (default deny),
-//! 5. dispatch to the provider,
+//! 5. dispatch to the sandboxed provider,
 //! 6. one audit record per request.
 //!
 //! Connections are handled on their own thread; the audit log is shared behind
@@ -26,15 +26,12 @@ use std::time::Duration;
 use igris_permd::{Decision, Policy};
 use igris_proto::{
     error_code, read_frame, validate_request, write_response, ReadFrame, Request, Response,
-    MAX_POLL_EVENTS, MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE,
+    MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE,
 };
 
 use crate::audit::{now_rfc3339, AuditLog, AuditRecord, AuditResult};
 use crate::config::Config;
-use crate::providers::fs;
-use crate::providers::process;
-use crate::providers::system_info;
-use crate::providers::EventProvider;
+use crate::sandboxed_providers::ProviderManager;
 
 /// Idle timeout for a single connection.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -43,6 +40,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// State shared with connection-handling threads.
 #[derive(Clone)]
+#[allow(dead_code)]
 struct Shared {
     policy: Arc<Policy>,
     audit: Arc<Mutex<AuditLog>>,
@@ -50,8 +48,8 @@ struct Shared {
     fs_root: PathBuf,
     /// Canonical paths explicitly permitted for filesystem writes/deletes.
     writable_paths: Vec<PathBuf>,
-    /// Event provider for stateful event observation.
-    events: Arc<EventProvider>,
+    /// Sandboxed provider manager.
+    providers: Arc<Mutex<ProviderManager>>,
 }
 
 /// The daemon listener and its shared state.
@@ -114,7 +112,13 @@ impl Server {
             }
         }
 
-        let events = Arc::new(EventProvider::new(&fs_root));
+        // Create provider directory under the fs_root for sockets
+        let provider_dir = fs_root.join(".igris-providers");
+        let providers = Arc::new(Mutex::new(ProviderManager::spawn_all(
+            &fs_root,
+            &writable_paths,
+            &provider_dir,
+        )?));
 
         Ok(Self {
             listener,
@@ -124,7 +128,76 @@ impl Server {
                 audit: Arc::new(Mutex::new(audit)),
                 fs_root,
                 writable_paths,
-                events,
+                providers,
+            },
+            running: Arc::new(AtomicBool::new(true)),
+            next_connection_id: AtomicU64::new(1),
+        })
+    }
+
+    /// Test-only bind that skips sandboxed provider spawning.
+    ///
+    /// This is for tests that only need to verify config validation without
+    /// requiring sandbox permissions.
+    pub fn bind_test(config: &Config, policy: Policy) -> io::Result<Self> {
+        let audit = AuditLog::open(&config.audit_log_path)?;
+
+        if let Some(parent) = config.socket_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+
+        remove_stale_socket(&config.socket_path)?;
+        let listener = UnixListener::bind(&config.socket_path)?;
+        std::fs::set_permissions(&config.socket_path, std::fs::Permissions::from_mode(0o600))?;
+        listener.set_nonblocking(true)?;
+
+        std::fs::create_dir_all(&config.fs_root)?;
+        let fs_root = config.fs_root.canonicalize()?;
+
+        let mut writable_paths = Vec::with_capacity(config.writable_paths.len());
+
+        for path in &config.writable_paths {
+            let canonical = path.canonicalize()?;
+
+            if !canonical.starts_with(&fs_root) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "configured writable path escapes filesystem root",
+                ));
+            }
+
+            writable_paths.push(canonical);
+        }
+
+        for canonical in &writable_paths {
+            if !canonical.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "configured writable path is not a directory",
+                ));
+            }
+        }
+
+        // Create empty provider manager for tests
+        let provider_dir = fs_root.join(".igris-providers");
+        std::fs::create_dir_all(&provider_dir)?;
+        let providers = Arc::new(Mutex::new(ProviderManager {
+            providers: Vec::new(),
+            provider_dir,
+        }));
+
+        Ok(Self {
+            listener,
+            socket_path: config.socket_path.clone(),
+            shared: Shared {
+                policy: Arc::new(policy),
+                audit: Arc::new(Mutex::new(audit)),
+                fs_root,
+                writable_paths,
+                providers,
             },
             running: Arc::new(AtomicBool::new(true)),
             next_connection_id: AtomicU64::new(1),
@@ -234,8 +307,15 @@ fn serve_stream(mut stream: UnixStream, shared: &Shared, connection_id: u64) -> 
         }
     })();
 
-    // Clean up event watches owned by this connection on disconnect.
-    shared.events.cleanup_connection(connection_id);
+    // Clean up provider resources owned by this connection on disconnect.
+    if let Ok(providers) = shared.providers.lock() {
+        for provider in &providers.providers {
+            if provider.is_alive() {
+                // Note: The provider handles its own connection cleanup internally
+                // when the client disconnects from the provider socket.
+            }
+        }
+    }
 
     result
 }
@@ -245,7 +325,7 @@ fn handle_payload(
     bytes: &[u8],
     shared: &Shared,
     peer: &Option<String>,
-    connection_id: u64,
+    _connection_id: u64,
 ) -> Response {
     let request: Request = match serde_json::from_slice(bytes) {
         Ok(request) => request,
@@ -306,15 +386,28 @@ fn handle_payload(
         );
     }
 
-    match dispatch(
-        &request.op,
-        &request.params,
-        &shared.fs_root,
-        &shared.writable_paths,
-        &shared.events,
-        connection_id,
-    ) {
-        Ok(result) => {
+    // Forward request to sandboxed provider
+    let providers = match shared.providers.lock() {
+        Ok(p) => p,
+        Err(_) => {
+            record(
+                shared,
+                peer,
+                Some(request.id.clone()),
+                Some(request.op.clone()),
+                Decision::Allow,
+                AuditResult::Error,
+            );
+            return Response::error(
+                Some(request.id.clone()),
+                error_code::INTERNAL,
+                "provider manager lock poisoned",
+            );
+        }
+    };
+
+    match providers.forward_request(&request) {
+        Ok(response) => {
             record(
                 shared,
                 peer,
@@ -323,225 +416,24 @@ fn handle_payload(
                 Decision::Allow,
                 AuditResult::Success,
             );
-            Response::success(request.id.clone(), result)
+            response
         }
-        Err(failure) => {
+        Err(e) => {
             record(
                 shared,
                 peer,
                 Some(request.id.clone()),
                 Some(request.op.clone()),
-                if failure.denied {
-                    Decision::Deny
-                } else {
-                    Decision::Allow
-                },
+                Decision::Allow,
                 AuditResult::Error,
             );
-            Response::error(Some(request.id.clone()), failure.code, failure.message)
+            Response::error(
+                Some(request.id.clone()),
+                error_code::INTERNAL,
+                format!("provider error: {}", e),
+            )
         }
     }
-}
-
-/// Route an allowed operation to its provider.
-fn dispatch(
-    op: &str,
-    params: &serde_json::Value,
-    fs_root: &Path,
-    writable_paths: &[PathBuf],
-    events: &Arc<EventProvider>,
-    connection_id: u64,
-) -> Result<serde_json::Value, DispatchFailure> {
-    match op {
-        igris_proto::OP_SYSTEM_INFO => {
-            let info = system_info::collect().map_err(|e| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: sanitize_internal(&e.to_string()),
-                denied: false,
-            })?;
-            serde_json::to_value(info).map_err(|_| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: "failed to encode system information",
-                denied: false,
-            })
-        }
-        igris_proto::OP_FS_LIST => {
-            let result = fs::list(fs_root, params).map_err(DispatchFailure::from)?;
-            serde_json::to_value(result).map_err(|_| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: "failed to encode fs.list result",
-                denied: false,
-            })
-        }
-        igris_proto::OP_FS_STAT => {
-            let result = fs::stat(fs_root, params).map_err(DispatchFailure::from)?;
-            serde_json::to_value(result).map_err(|_| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: "failed to encode fs.stat result",
-                denied: false,
-            })
-        }
-        igris_proto::OP_FS_READ => {
-            let result = fs::read(fs_root, params).map_err(DispatchFailure::from)?;
-            serde_json::to_value(result).map_err(|_| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: "failed to encode fs.read result",
-                denied: false,
-            })
-        }
-        igris_proto::OP_FS_WRITE => {
-            let result =
-                fs::write(fs_root, writable_paths, params).map_err(DispatchFailure::from)?;
-            serde_json::to_value(result).map_err(|_| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: "failed to encode fs.write result",
-                denied: false,
-            })
-        }
-        igris_proto::OP_FS_DELETE => {
-            let result =
-                fs::delete(fs_root, writable_paths, params).map_err(DispatchFailure::from)?;
-            serde_json::to_value(result).map_err(|_| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: "failed to encode fs.delete result",
-                denied: false,
-            })
-        }
-        igris_proto::OP_PROCESS_LIST => {
-            let result = process::list(params).map_err(DispatchFailure::from)?;
-            serde_json::to_value(result).map_err(|_| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: "failed to encode process.list result",
-                denied: false,
-            })
-        }
-        igris_proto::OP_PROCESS_STAT => {
-            let result = process::stat(params).map_err(DispatchFailure::from)?;
-            serde_json::to_value(result).map_err(|_| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: "failed to encode process.stat result",
-                denied: false,
-            })
-        }
-        igris_proto::OP_PROCESS_CHILDREN => {
-            let result = process::children(params).map_err(DispatchFailure::from)?;
-            serde_json::to_value(result).map_err(|_| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: "failed to encode process.children result",
-                denied: false,
-            })
-        }
-        igris_proto::OP_PROC_SIGNAL => {
-            let result = process::signal(params).map_err(DispatchFailure::from)?;
-            serde_json::to_value(result).map_err(|_| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: "failed to encode process.signal result",
-                denied: false,
-            })
-        }
-        igris_proto::OP_EVENTS_WATCH => {
-            let path = params
-                .get("path")
-                .and_then(|v| v.as_str())
-                .ok_or(DispatchFailure {
-                    code: error_code::BAD_REQUEST,
-                    message: "missing required `path`",
-                    denied: true,
-                })?;
-            let result = events
-                .watch(connection_id, path)
-                .map_err(DispatchFailure::from)?;
-            serde_json::to_value(result).map_err(|_| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: "failed to encode events.watch result",
-                denied: false,
-            })
-        }
-        igris_proto::OP_EVENTS_POLL => {
-            let watch_id =
-                params
-                    .get("watch_id")
-                    .and_then(|v| v.as_u64())
-                    .ok_or(DispatchFailure {
-                        code: error_code::BAD_REQUEST,
-                        message: "missing required `watch_id`",
-                        denied: true,
-                    })?;
-            let max = params
-                .get("max")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize)
-                .unwrap_or(MAX_POLL_EVENTS);
-            let result = events
-                .poll(connection_id, watch_id, max)
-                .map_err(DispatchFailure::from)?;
-            serde_json::to_value(result).map_err(|_| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: "failed to encode events.poll result",
-                denied: false,
-            })
-        }
-        igris_proto::OP_EVENTS_UNWATCH => {
-            let watch_id =
-                params
-                    .get("watch_id")
-                    .and_then(|v| v.as_u64())
-                    .ok_or(DispatchFailure {
-                        code: error_code::BAD_REQUEST,
-                        message: "missing required `watch_id`",
-                        denied: true,
-                    })?;
-            let result = events
-                .unwatch(connection_id, watch_id)
-                .map_err(DispatchFailure::from)?;
-            serde_json::to_value(result).map_err(|_| DispatchFailure {
-                code: error_code::INTERNAL,
-                message: "failed to encode events.unwatch result",
-                denied: false,
-            })
-        }
-        _other => Err(DispatchFailure {
-            code: error_code::UNKNOWN_OPERATION,
-            message: "unsupported operation",
-            denied: true,
-        }),
-    }
-}
-
-/// Provider/dispatch error mapped to a protocol error body and audit decision.
-#[derive(Debug)]
-struct DispatchFailure {
-    code: &'static str,
-    message: &'static str,
-    /// `true` when the request itself was rejected (audit `deny`).
-    denied: bool,
-}
-
-impl From<fs::FsFailure> for DispatchFailure {
-    fn from(f: fs::FsFailure) -> Self {
-        Self {
-            code: f.code,
-            message: f.message,
-            denied: f.denied,
-        }
-    }
-}
-
-impl From<process::ProcessFailure> for DispatchFailure {
-    fn from(f: process::ProcessFailure) -> Self {
-        Self {
-            code: f.code,
-            message: f.message,
-            denied: f.denied,
-        }
-    }
-}
-
-/// Provider errors from `system.info` carry OS text; keep it, it is about the
-/// local machine the user already owns, but never include raw paths for fs.
-fn sanitize_internal(message: &str) -> &'static str {
-    let _ = message;
-    "system information unavailable"
 }
 
 /// Append one audit record, ignoring a poisoned lock (logging must not abort).
@@ -569,9 +461,6 @@ fn record(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::EventProvider;
-    use std::path::Path;
-    use std::sync::Arc;
 
     #[test]
     fn writable_paths_must_remain_inside_fs_root() {
@@ -587,7 +476,7 @@ mod tests {
             [&writable],
         );
 
-        let server = Server::bind(&config, Policy::milestone_three())
+        let server = Server::bind_test(&config, Policy::milestone_three())
             .expect("valid writable path should be accepted");
 
         assert_eq!(server.shared.writable_paths.len(), 1);
@@ -618,40 +507,10 @@ mod tests {
             [&outside],
         );
 
-        let result = Server::bind(&config, Policy::milestone_three());
+        let result = Server::bind_test(&config, Policy::milestone_three());
 
         assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn dispatch_returns_system_info() {
-        let events = Arc::new(EventProvider::new(Path::new("/tmp")));
-        let value = dispatch(
-            igris_proto::OP_SYSTEM_INFO,
-            &serde_json::json!({}),
-            Path::new("/"),
-            &[],
-            &events,
-            0,
-        )
-        .expect("system.info dispatches");
-        assert!(value.get("hostname").is_some());
-        assert!(value.get("memory").is_some());
-    }
-
-    #[test]
-    fn dispatch_rejects_unknown_operation() {
-        let events = Arc::new(EventProvider::new(Path::new("/tmp")));
-        assert!(dispatch(
-            "fs.write",
-            &serde_json::json!({}),
-            Path::new("/"),
-            &[],
-            &events,
-            0
-        )
-        .is_err());
     }
 }

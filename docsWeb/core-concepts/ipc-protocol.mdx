@@ -1,0 +1,485 @@
+---
+title: "IPC Protocol"
+description: "Igris OS IPC protocol specification: transport, framing, message format, and versioning"
+---
+
+# IPC Protocol Specification
+
+The Igris OS IPC protocol is a **versioned, JSON-RPC 2.0-based protocol** over Unix domain sockets with length-prefixed framing.
+
+## Transport
+
+| Property | Value |
+|----------|-------|
+| **Socket Type** | `AF_UNIX`, `SOCK_STREAM` (sequenced, reliable) |
+| **Permissions** | `0600` in `0700` directory |
+| **Default Path** | `$XDG_RUNTIME_DIR/igris/igrisd.sock` or `~/.igris/igrisd.sock` |
+| **Override** | `IGRIS_SOCKET_PATH` environment variable |
+
+## Framing
+
+All messages are **length-prefixed** for streaming parsing:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  4 bytes (big-endian)  │  N bytes (UTF-8 JSON)              │
+│  Message Length        │  JSON-RPC Message                  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **Max message size:** 4 MB (configurable)
+- **Length field:** 32-bit unsigned integer (big-endian)
+- **Encoding:** UTF-8
+
+### Example Frame
+
+```
+00 00 00 7B  7B 22 6A 73 6F 6E 72 70 63 22 3A 22 32 2E 30 22 2C 22 69 64 22 3A 31 2C 22 6D 65 74 68 6F 64 22 3A 22 73 79 73 74 65 6D 2E 69 6E 66 6F 22 2C 22 70 61 72 61 6D 73 22 3A 7B 7D 7D
+│            │  └──────────────────────────────────────────────────────┘
+│            │                    JSON Payload (123 bytes)
+│            └────────────────── Length: 0x7B = 123
+```
+
+## Connection Lifecycle
+
+### 1. Handshake
+
+Client connects → Server sends **hello** → Client sends **hello** → Ready
+
+```
+Server ──► { "jsonrpc": "2.0", "method": "hello", "params": { "version": 1, "server": "igrisd", "capabilities": [...] } }
+Client ──► { "jsonrpc": "2.0", "method": "hello", "params": { "version": 1, "client": "igrisctl", "capabilities": [...] } }
+```
+
+### 2. Request/Response
+
+Standard JSON-RPC 2.0 with extensions:
+
+```
+Client ──► { "jsonrpc": "2.0", "id": 1, "method": "fs.read", "params": { "path": "...", "max_bytes": 1024 } }
+Server ──► { "jsonrpc": "2.0", "id": 1, "result": { "content": "...", "truncated": false } }
+```
+
+### 3. Notifications (Server → Client)
+
+For async events (future: streaming IPC):
+
+```
+Server ──► { "jsonrpc": "2.0", "method": "events.notify", "params": { "watch_id": 1, "events": [...] } }
+```
+
+### 4. Close
+
+Either party closes TCP connection → Cleanup watches, remove connection.
+
+## Message Format
+
+### Request
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tool.name",
+  "params": { ... }
+}
+```
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `jsonrpc` | Yes | string | Must be `"2.0"` |
+| `id` | Yes | string/number/null | Request identifier (echoed in response) |
+| `method` | Yes | string | Tool name (e.g., `fs.read`, `system.info`) |
+| `params` | Yes | object | Tool-specific parameters |
+
+### Success Response
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": { ... }
+}
+```
+
+### Error Response
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "Permission denied",
+    "data": {
+      "reason": "capability_not_granted",
+      "capability": "filesystem_write"
+    }
+  }
+}
+```
+
+### Error Codes
+
+| Code | Meaning | HTTP Equivalent |
+|------|---------|-----------------|
+| `-32700` | Parse error | 400 |
+| `-32600` | Invalid request | 400 |
+| `-32601` | Method not found | 404 |
+| `-32602` | Invalid params | 400 |
+| `-32603` | Internal error | 500 |
+| `-32000` | Permission denied | 403 |
+| `-32001` | Capability not enabled | 403 |
+| `-32002` | Path not allowed | 403 |
+| `-32003` | Confirmation required | 400 |
+| `-32004` | Resource exhausted | 429 |
+| `-32005` | Watch not found | 404 |
+
+## Protocol Versioning
+
+### Version Negotiation
+
+1. Server advertises supported versions in `hello`
+2. Client selects highest compatible version
+3. All subsequent messages use that version
+
+### Current Version: 1
+
+Version 1 features:
+- JSON-RPC 2.0 base
+- Length-prefixed framing
+- Tool methods: `system.info`, `fs.*`, `process.*`, `events.*`, `proc.signal`
+- Synchronous request/response
+- Append-only audit logging
+
+### Future Versions
+
+Planned for v2:
+- Streaming responses (WebSocket-style)
+- Binary encoding option (CBOR/MessagePack)
+- Request cancellation
+- Bidirectional notifications
+- Connection migration
+
+## Tool Methods Reference
+
+### System Tools
+
+| Method | Description | Parameters | Capability |
+|--------|-------------|------------|------------|
+| `system.info` | Kernel/system information | `{}` | (none) |
+
+### Filesystem Tools
+
+| Method | Description | Parameters | Capability |
+|--------|-------------|------------|------------|
+| `fs.list` | List directory entries | `{ "path": "string", "max_entries?": number }` | `filesystem_read` |
+| `fs.stat` | File metadata | `{ "path": "string" }` | `filesystem_read` |
+| `fs.read` | Read file (base64) | `{ "path": "string", "max_bytes?": number }` | `filesystem_read` |
+| `fs.write` | Write file (base64) | `{ "path": "string", "content": "string", "confirm": boolean }` | `filesystem_write` |
+| `fs.delete` | Delete file/symlink | `{ "path": "string", "confirm": boolean }` | `filesystem_write` |
+
+### Process Tools
+
+| Method | Description | Parameters | Capability |
+|--------|-------------|------------|------------|
+| `process.list` | List processes | `{ "max?": number }` | (none) |
+| `process.stat` | Process metadata | `{ "pid": number }` | (none) |
+| `process.children` | Child processes | `{ "pid": number }` | (none) |
+| `proc.signal` | Send SIGTERM | `{ "pid": number, "confirm": boolean }` | `process_control` |
+
+### Event Tools
+
+| Method | Description | Parameters | Capability |
+|--------|-------------|------------|------------|
+| `events.watch` | Create watch | `{ "path": "string" }` | `event_observation` |
+| `events.poll` | Poll events | `{ "watch_id": number, "max?": number }` | `event_observation` |
+| `events.unwatch` | Remove watch | `{ "watch_id": number }` | `event_observation` |
+
+## Parameter Details
+
+### fs.list
+
+```json
+{
+  "path": "/absolute/path/within/root",
+  "max_entries": 100
+}
+```
+
+Response:
+```json
+{
+  "entries": [
+    { "name": "file.txt", "type": "file", "size": 1024 },
+    { "name": "dir", "type": "directory", "size": 4096 },
+    { "name": "link", "type": "symlink", "size": 12, "target": "file.txt" }
+  ],
+  "truncated": false
+}
+```
+
+### fs.stat
+
+```json
+{ "path": "/absolute/path/within/root" }
+```
+
+Response:
+```json
+{
+  "type": "file",
+  "size": 1024,
+  "mode": 0o644,
+  "uid": 1000,
+  "gid": 1000,
+  "mtime": "2025-01-15T10:30:45Z",
+  "atime": "2025-01-15T10:30:45Z",
+  "ctime": "2025-01-15T10:30:45Z"
+}
+```
+
+### fs.read
+
+```json
+{ "path": "/absolute/path/within/root", "max_bytes": 4096 }
+```
+
+Response:
+```json
+{
+  "content": "base64-encoded-content",
+  "truncated": false
+}
+```
+
+### fs.write
+
+```json
+{
+  "path": "/absolute/path/within/writable/root",
+  "content": "base64-encoded-content",
+  "confirm": true
+}
+```
+
+Response:
+```json
+{ "written": 1024 }
+```
+
+### fs.delete
+
+```json
+{ "path": "/absolute/path/within/writable/root", "confirm": true }
+```
+
+Response:
+```json
+{ "deleted": true }
+```
+
+### process.list
+
+```json
+{ "max": 50 }
+```
+
+Response:
+```json
+{
+  "processes": [
+    { "pid": 1, "ppid": 0, "name": "systemd", "state": "S", "uid": 0, "gid": 0, "rss_kb": 12345 },
+    { "pid": 123, "ppid": 1, "name": "nginx", "state": "S", "uid": 33, "gid": 33, "rss_kb": 5678 }
+  ],
+  "truncated": false
+}
+```
+
+### process.stat
+
+```json
+{ "pid": 123 }
+```
+
+Response:
+```json
+{
+  "pid": 123,
+  "ppid": 1,
+  "name": "nginx",
+  "state": "S",
+  "uid": 33,
+  "gid": 33,
+  "rss_kb": 5678
+}
+```
+
+### process.children
+
+```json
+{ "pid": 1 }
+```
+
+Response:
+```json
+{
+  "children": [
+    { "pid": 123, "ppid": 1, "name": "nginx", "state": "S", "uid": 33, "gid": 33, "rss_kb": 5678 }
+  ]
+}
+```
+
+### proc.signal
+
+```json
+{ "pid": 123, "confirm": true }
+```
+
+Response:
+```json
+{ "signaled": true }
+```
+
+### events.watch
+
+```json
+{ "path": "/absolute/path/within/root" }
+```
+
+Response:
+```json
+{ "watch_id": 1 }
+```
+
+### events.poll
+
+```json
+{ "watch_id": 1, "max": 10 }
+```
+
+Response:
+```json
+{
+  "events": [
+    { "watch_id": 1, "path": "/path/to/file", "mask": "IN_MODIFY", "cookie": 0 },
+    { "watch_id": 1, "path": "/path/to/file", "mask": "IN_ATTRIB", "cookie": 0 }
+  ],
+  "dropped": 0
+}
+```
+
+### events.unwatch
+
+```json
+{ "watch_id": 1 }
+```
+
+Response:
+```json
+{ "unwatched": true }
+```
+
+## Limits and Constraints
+
+| Limit | Value | Description |
+|-------|-------|-------------|
+| Max message size | 4 MB | Request/response |
+| Max connections | 100 | Concurrent |
+| Max watches/connection | 16 | `events.watch` |
+| Max queued events | 256 | Total across all watches |
+| Max events/watch | 16 | Per watch queue |
+| Max poll events | 100 | `events.poll` max parameter |
+| Request timeout | 30s | Per-request |
+
+## Client Implementation Guide
+
+### Rust (Reference: `core/igrisctl`)
+
+```rust
+use tokio::net::UnixStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+async fn send_request(socket_path: &str, request: serde_json::Value) -> Result<serde_json::Value> {
+    let mut stream = UnixStream::connect(socket_path).await?;
+    
+    // Send hello
+    let hello = json!({ "jsonrpc": "2.0", "method": "hello", "params": { "version": 1, "client": "my-client" } });
+    send_frame(&mut stream, &hello).await?;
+    let _ = recv_frame(&mut stream).await?; // Server hello
+    
+    // Send actual request
+    send_frame(&mut stream, &request).await?;
+    let response = recv_frame(&mut stream).await?;
+    
+    Ok(response)
+}
+
+async fn send_frame(stream: &mut UnixStream, msg: &serde_json::Value) -> Result<()> {
+    let bytes = serde_json::to_vec(msg)?;
+    let len = (bytes.len() as u32).to_be_bytes();
+    stream.write_all(&len).await?;
+    stream.write_all(&bytes).await?;
+    Ok(())
+}
+
+async fn recv_frame(stream: &mut UnixStream) -> Result<serde_json::Value> {
+    let mut len_bytes = [0u8; 4];
+    stream.read_exact(&mut len_bytes).await?;
+    let len = u32::from_be_bytes(len_bytes) as usize;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).await?;
+    Ok(serde_json::from_slice(&buf)?)
+}
+```
+
+### Python
+
+```python
+import json
+import socket
+import struct
+
+class IgrisClient:
+    def __init__(self, socket_path: str):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.connect(socket_path)
+        self._handshake()
+    
+    def _handshake(self):
+        hello = {"jsonrpc": "2.0", "method": "hello", "params": {"version": 1, "client": "python-client"}}
+        self._send(hello)
+        self._recv()  # Server hello
+    
+    def _send(self, msg: dict):
+        data = json.dumps(msg).encode('utf-8')
+        self.sock.sendall(struct.pack('>I', len(data)))
+        self.sock.sendall(data)
+    
+    def _recv(self) -> dict:
+        len_bytes = self.sock.recv(4)
+        length = struct.unpack('>I', len_bytes)[0]
+        data = b''
+        while len(data) < length:
+            data += self.sock.recv(length - len(data))
+        return json.loads(data.decode('utf-8'))
+    
+    def call(self, method: str, params: dict) -> dict:
+        request = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+        self._send(request)
+        return self._recv()
+    
+    def system_info(self):
+        return self.call("system.info", {})
+    
+    def fs_read(self, path: str, max_bytes: int = 4096):
+        return self.call("fs.read", {"path": path, "max_bytes": max_bytes})
+```
+
+## Related Documentation
+
+- [Architecture](/core-concepts/architecture) — Component overview
+- [Security Model](/core-concepts/security-model) — Permission enforcement
+- [Event System](/core-concepts/event-system) — Event observation
+- [API Reference](/api-reference/overview) — Tool reference
+- [ADR 0006](/adr/0006-unix-socket-ipc-boundary) — IPC boundary decision

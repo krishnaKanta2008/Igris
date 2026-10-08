@@ -1,0 +1,398 @@
+---
+title: "Writing Policies"
+description: "Guide to creating and managing Igris OS permission policies"
+---
+
+# Writing Policies
+
+Policies control which capabilities are granted to connections. They are evaluated by the `igris-permd` permission broker.
+
+## Policy File Format
+
+Policies are written in **TOML** format and loaded by `igris-permd`.
+
+### Basic Structure
+
+```toml
+# /etc/igris/policy.toml
+
+[policy.default]
+# Default policy (used when IGRIS_POLICY not set)
+allow = [
+  { capability = "filesystem_read" },
+]
+
+[policy.milestone_six]
+# Named policy (selected via IGRIS_POLICY=milestone_six)
+allow = [
+  { capability = "filesystem_read" },
+  { capability = "filesystem_write", paths = ["/home/user/.igris/share/writable"] },
+  { capability = "process_control", require_confirm = true },
+  { capability = "event_observation" },
+]
+
+[policy.strict]
+# Restrictive policy
+allow = [
+  { capability = "filesystem_read", paths = ["/home/user/.igris/share/public"] },
+]
+deny = [
+  { capability = "filesystem_write" },
+  { capability = "process_control" },
+  { capability = "event_observation" },
+]
+```
+
+## Policy Selection
+
+```bash
+# Use specific policy
+export IGRIS_POLICY=milestone_six
+./target/debug/igrisd
+
+# Or for permd directly
+export IGRIS_POLICY=strict
+./target/debug/igris-permd
+```
+
+## Rule Syntax
+
+### Allow Rules
+
+```toml
+allow = [
+  # Grant capability unconditionally
+  { capability = "filesystem_read" },
+
+  # Grant with path restrictions
+  { capability = "filesystem_write", paths = ["/allowed/path1", "/allowed/path2"] },
+
+  # Grant with confirmation requirement override
+  { capability = "process_control", require_confirm = true },
+]
+```
+
+### Deny Rules
+
+```toml
+deny = [
+  # Explicitly deny capability
+  { capability = "filesystem_write" },
+  
+  # Deny with path restrictions (deny specific paths)
+  { capability = "filesystem_read", paths = ["/home/user/.igris/share/private"] },
+]
+```
+
+### Rule Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `capability` | string | Yes | Capability name |
+| `paths` | array[string] | No | Allowed/denied paths (filesystem capabilities only) |
+| `require_confirm` | boolean | No | Override confirmation requirement |
+
+## Capabilities Reference
+
+| Capability | Tools | Path Restrictions | Confirm Override |
+|------------|-------|-------------------|------------------|
+| `filesystem_read` | `fs.list`, `fs.stat`, `fs.read` | ✅ Yes | ❌ No |
+| `filesystem_write` | `fs.write`, `fs.delete` | ✅ Yes | ✅ Yes |
+| `process_control` | `proc.signal` | ❌ No | ✅ Yes |
+| `event_observation` | `events.watch`, `events.poll`, `events.unwatch` | ❌ No | ❌ No |
+
+## Path Matching
+
+Paths in rules are **prefix-matched** after canonicalization:
+
+```toml
+# This allows writes to /home/user/.igris/share/writable AND its subdirectories
+{ capability = "filesystem_write", paths = ["/home/user/.igris/share/writable"] }
+
+# This allows reads from /home/user/.igris/share/public ONLY (not subdirs unless listed)
+{ capability = "filesystem_read", paths = ["/home/user/.igris/share/public"] }
+```
+
+### Path Matching Rules
+
+1. Paths are canonicalized (symlinks resolved, `..` removed)
+2. Rule path must be a **prefix** of request path
+3. Exact match or parent directory match both work
+4. Multiple paths: **any match allows**
+
+## Evaluation Order
+
+```
+1. Check if capability is ENABLED at daemon startup (env vars)
+   → If not enabled: DENY (CAPABILITY_NOT_ENABLED)
+
+2. Evaluate DENY rules (in order)
+   → First matching deny rule: DENY
+
+3. Evaluate ALLOW rules (in order)
+   → First matching allow rule: ALLOW
+
+4. No rule matched: DENY (default deny)
+```
+
+## Common Policy Patterns
+
+### Development Policy (Permissive)
+
+```toml
+[policy.development]
+allow = [
+  { capability = "filesystem_read" },
+  { capability = "filesystem_write", paths = ["/home/user/.igris/share"] },
+  { capability = "process_control", require_confirm = true },
+  { capability = "event_observation" },
+]
+```
+
+### Production Policy (Restrictive)
+
+```toml
+[policy.production]
+allow = [
+  # Read-only access to shared data
+  { capability = "filesystem_read", paths = ["/var/lib/igris/share/public"] },
+  
+  # Write access to specific upload directories
+  { capability = "filesystem_write", paths = ["/var/lib/igris/share/uploads"] },
+  
+  # Process control with mandatory confirmation
+  { capability = "process_control", require_confirm = true },
+  
+  # Event observation for monitoring
+  { capability = "event_observation" },
+]
+
+# Explicitly deny sensitive paths
+deny = [
+  { capability = "filesystem_read", paths = ["/var/lib/igris/share/private"] },
+  { capability = "filesystem_write", paths = ["/var/lib/igris/share/system"] },
+]
+```
+
+### AI Agent Policy (Sandboxed)
+
+```toml
+[policy.agent_sandbox]
+allow = [
+  # Read-only access to agent workspace
+  { capability = "filesystem_read", paths = ["/home/user/.igris/share/agent_workspace"] },
+  
+  # Write access to agent output directory only
+  { capability = "filesystem_write", paths = ["/home/user/.igris/share/agent_output"] },
+  
+  # No process control
+  # No event observation
+]
+```
+
+### Read-Only Policy
+
+```toml
+[policy.readonly]
+allow = [
+  { capability = "filesystem_read" },
+]
+
+deny = [
+  { capability = "filesystem_write" },
+  { capability = "process_control" },
+  { capability = "event_observation" },
+]
+```
+
+## Advanced Patterns
+
+### Conditional Rules (Future)
+
+```toml
+# Planned: conditional rules based on peer info
+allow = [
+  { capability = "filesystem_write", 
+    paths = ["/home/user/.igris/share/writable"],
+    condition = "peer.uid == 1000"  # Only for specific user
+  },
+]
+```
+
+### Time-Based Rules (Future)
+
+```toml
+# Planned: time-based access
+allow = [
+  { capability = "process_control",
+    require_confirm = true,
+    condition = "time.hour >= 9 && time.hour <= 17"  # Business hours only
+  },
+]
+```
+
+## Policy File Location
+
+### Default Locations
+
+```bash
+# 1. Environment variable (highest priority)
+IGRIS_POLICY_PATH=/custom/path/policy.toml
+
+# 2. System location
+/etc/igris/policy.toml
+
+# 3. User location
+~/.config/igris/policy.toml
+```
+
+### Loading Priority
+
+1. `IGRIS_POLICY_PATH` environment variable
+2. `/etc/igris/policy.toml`
+3. `$XDG_CONFIG_HOME/igris/policy.toml`
+4. Built-in default (allow `filesystem_read` only)
+
+## Testing Policies
+
+### Dry Run with igris-permd
+
+```bash
+# Start permd with test policy
+IGRIS_POLICY_PATH=./test-policy.toml IGRIS_POLICY=test ./target/debug/igris-permd
+
+# In another terminal, test via igrisd (which connects to permd)
+IGRIS_POLICY=test ./target/debug/igrisd
+```
+
+### Unit Tests (Rust)
+
+```rust
+// In igris-permd tests
+#[test]
+fn test_policy_allows_filesystem_read() {
+    let policy = parse_policy(r#"
+        allow = [{ capability = "filesystem_read" }]
+    "#);
+    
+    let decision = policy.evaluate(Capability::FilesystemRead, None, false);
+    assert_eq!(decision, Decision::Allow);
+}
+
+#[test]
+fn test_policy_denies_write_without_path() {
+    let policy = parse_policy(r#"
+        allow = [{ capability = "filesystem_write", paths = ["/allowed"] }]
+    "#);
+    
+    let decision = policy.evaluate(Capability::FilesystemWrite, Some("/forbidden"), true);
+    assert_eq!(decision, Decision::Deny);
+}
+```
+
+### Integration Test
+
+```bash
+#!/bin/bash
+# test-policy.sh
+
+POLICY_FILE="/tmp/test-policy.toml"
+cat > "$POLICY_FILE" << 'EOF'
+[policy.test]
+allow = [
+  { capability = "filesystem_read" },
+  { capability = "filesystem_write", paths = ["/tmp/igris-test/writable"] },
+]
+EOF
+
+mkdir -p /tmp/igris-test/writable
+
+# Start with test policy
+IGRIS_POLICY_PATH="$POLICY_FILE" IGRIS_POLICY=test \
+IGRIS_FS_ROOT=/tmp/igris-test \
+IGRIS_WRITABLE_PATHS=/tmp/igris-test/writable \
+./target/debug/igrisd &
+DAEMON_PID=$!
+
+sleep 1
+
+# Test read (should work)
+./target/debug/igrisctl fs.list --path /tmp/igris-test
+
+# Test write to allowed (should work)
+echo "test" | base64 | xargs -I{} ./target/debug/igrisctl fs.write \
+  --path /tmp/igris-test/writable/test.txt --content {} --confirm
+
+# Test write to denied (should fail)
+echo "test" | base64 | xargs -I{} ./target/debug/igrisctl fs.write \
+  --path /tmp/igris-test/denied.txt --content {} --confirm 2>&1 | grep -q "denied" && echo "✅ Correctly denied"
+
+kill $DAEMON_PID
+echo "Policy test passed"
+```
+
+## Policy Migration
+
+### Versioning Policies
+
+```toml
+# policy.toml
+version = 1
+
+[policy.v1_default]
+allow = [...]
+
+[policy.v2_strict]
+allow = [...]
+# ...
+```
+
+### Rolling Updates
+
+```bash
+# 1. Deploy new policy file
+sudo cp new-policy.toml /etc/igris/policy.toml
+
+# 2. Reload permd (SIGHUP - future)
+# Currently requires restart:
+sudo systemctl restart igris-permd
+sudo systemctl restart igrisd
+```
+
+## Debugging Policies
+
+### Enable Debug Logging
+
+```bash
+RUST_LOG=igris_permd=debug ./target/debug/igris-permd
+```
+
+### Log Output
+
+```
+DEBUG igris_permd::policy: Evaluating request: capability=filesystem_write, path=/home/user/.igris/share/writable/test.txt, confirm=true
+DEBUG igris_permd::policy: Checking deny rules...
+DEBUG igris_permd::policy: Checking allow rules...
+DEBUG igris_permd::policy: Rule match: allow filesystem_write with paths [/home/user/.igris/share/writable]
+DEBUG igris_permd::policy: Path /home/user/.igris/share/writable/test.txt matches /home/user/.igris/share/writable
+DEBUG igris_permd::policy: Decision: Allow
+```
+
+### Audit Log Analysis
+
+```bash
+# Check decisions
+jq 'select(.operation == "fs.write") | .decision' ~/.local/state/igris/audit.log | sort | uniq -c
+
+# Find denied requests
+jq 'select(.decision == "deny")' ~/.local/state/igris/audit.log
+```
+
+---
+
+## Related
+
+- [Permission System](/api-reference/permission-system) — Complete reference
+- [Security Model](/core-concepts/security-model) — Architecture
+- [Configuration](/guides/configuration) — Environment variables
+- [Running Daemon](/guides/running-daemon) — Production deployment

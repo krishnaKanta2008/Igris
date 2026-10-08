@@ -73,7 +73,7 @@ impl TestDaemon {
             Config::with_writable_paths(&socket_path, &audit_path, &fs_root, writable_paths)
         };
 
-        let server = Arc::new(Server::bind(&config, policy).expect("bind test server"));
+        let server = Arc::new(Server::bind_test(&config, policy).expect("bind test server"));
 
         let runner = server.clone();
         let handle = thread::spawn(move || {

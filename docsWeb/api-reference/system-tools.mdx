@@ -1,0 +1,196 @@
+---
+title: "System Tools"
+description: "Reference for system information tools: system.info"
+---
+
+# System Tools
+
+## system.info
+
+Retrieve live kernel and system information from `/proc` and `/sys`.
+
+### Capability Required
+
+None (always available)
+
+### Parameters
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "system.info",
+  "params": {}
+}
+```
+
+### Response
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "kernel": {
+      "version": "6.8.0-1006-azure",
+      "release": "6.8.0-1006-azure",
+      "architecture": "x86_64",
+      "hostname": "igris-dev",
+      "os": "Linux",
+      "platform": "ubuntu",
+      "platform_version": "22.04"
+    },
+    "cpu": {
+      "count": 8,
+      "model": "AMD EPYC 7763 64-Core Processor",
+      "mhz": 2449.998,
+      "cache_kb": 32768
+    },
+    "memory": {
+      "total_kb": 32768000,
+      "available_kb": 28123456,
+      "used_kb": 4644544,
+      "free_kb": 1234567,
+      "buffers_kb": 567890,
+      "cached_kb": 12345678
+    },
+    "uptime_seconds": 1234567,
+    "load_average": {
+      "1m": 0.52,
+      "5m": 0.48,
+      "15m": 0.45
+    },
+    "igris": {
+      "version": "0.1.0",
+      "protocol_version": 1,
+      "daemon_pid": 12345,
+      "daemon_uptime_seconds": 3600,
+      "connections_active": 2,
+      "watches_active": 3,
+      "audit_log_path": "/home/user/.local/state/igris/audit.log"
+    }
+  }
+}
+```
+
+### Response Fields
+
+#### kernel
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | Full kernel version string |
+| `release` | string | Kernel release (from `uname -r`) |
+| `architecture` | string | CPU architecture (e.g., `x86_64`, `aarch64`) |
+| `hostname` | string | System hostname |
+| `os` | string | Operating system name |
+| `platform` | string | Distribution ID (e.g., `ubuntu`, `arch`, `fedora`) |
+| `platform_version` | string | Distribution version |
+
+#### cpu
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `count` | integer | Logical CPU count |
+| `model` | string | CPU model name from `/proc/cpuinfo` |
+| `mhz` | number | Current CPU frequency in MHz |
+| `cache_kb` | integer | L3 cache size in KB |
+
+#### memory
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `total_kb` | integer | Total physical memory (MemTotal) |
+| `available_kb` | integer | Available memory (MemAvailable) |
+| `used_kb` | integer | Used memory (estimated) |
+| `free_kb` | integer | Free memory (MemFree) |
+| `buffers_kb` | integer | Buffer memory (Buffers) |
+| `cached_kb` | integer | Cached memory (Cached) |
+
+#### system
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `uptime_seconds` | integer | System uptime from `/proc/uptime` |
+| `load_average.1m` | number | 1-minute load average |
+| `load_average.5m` | number | 5-minute load average |
+| `load_average.15m` | number | 15-minute load average |
+
+#### igris
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | string | Igris daemon version |
+| `protocol_version` | integer | IPC protocol version |
+| `daemon_pid` | integer | Daemon process ID |
+| `daemon_uptime_seconds` | integer | Daemon uptime |
+| `connections_active` | integer | Active client connections |
+| `watches_active` | integer | Active event watches |
+| `audit_log_path` | string | Audit log file path |
+
+### igrisctl Usage
+
+```bash
+# Human-readable output
+./target/debug/igrisctl system.info
+
+# JSON output
+./target/debug/igrisctl system.info --json
+```
+
+### Example Output (Human)
+
+```
+Igris OS System Information
+============================
+
+Kernel:
+  Version:       6.8.0-1006-azure
+  Architecture:  x86_64
+  Hostname:      igris-dev
+  Platform:      Ubuntu 22.04
+
+CPU:
+  Cores:         8
+  Model:         AMD EPYC 7763 64-Core Processor
+  Frequency:     2450 MHz
+  L3 Cache:      32 MB
+
+Memory:
+  Total:         31.2 GB
+  Available:     26.8 GB
+  Used:          4.4 GB
+  Free:          1.2 GB
+  Buffers:       554 MB
+  Cached:        11.8 GB
+
+System:
+  Uptime:        14 days, 6 hours
+  Load (1/5/15): 0.52 / 0.48 / 0.45
+
+Igris Daemon:
+  Version:       0.1.0
+  Protocol:      1
+  PID:           12345
+  Uptime:        1 hour
+  Connections:   2
+  Watches:       3
+  Audit Log:     /home/user/.local/state/igris/audit.log
+```
+
+### Data Sources
+
+| Information | Source |
+|-------------|--------|
+| Kernel version | `/proc/sys/kernel/osrelease`, `uname()` |
+| CPU info | `/proc/cpuinfo` |
+| Memory info | `/proc/meminfo` |
+| Uptime/load | `/proc/uptime`, `/proc/loadavg` |
+| Platform | `/etc/os-release` |
+
+### Notes
+
+- All data is read at request time (live)
+- No caching; each call reads fresh from `/proc`/`/sys`
+- Requires read access to `/proc` and `/sys` (standard on Linux)
+- Igris-specific fields reflect daemon internal state

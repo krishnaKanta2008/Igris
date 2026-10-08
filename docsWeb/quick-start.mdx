@@ -1,0 +1,188 @@
+---
+title: "Quick Start"
+description: "A comprehensive walkthrough to get Igris OS running quickly"
+---
+
+# Quick Start Guide
+
+This guide provides a step-by-step walkthrough to get Igris OS up and running with all features enabled.
+
+## Step 1: Environment Setup
+
+```bash
+# Ensure you're on Linux or WSL2
+uname -a
+
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+# Verify Rust version matches rust-toolchain.toml
+rustc --version
+cargo --version
+
+# Install Python 3.10+ (Ubuntu/WSL2)
+sudo apt update && sudo apt install -y python3 python3-venv python3-pip
+
+# Install build dependencies
+sudo apt install -y gcc cmake pkg-config libssl-dev
+```
+
+## Step 2: Clone and Build
+
+```bash
+git clone https://github.com/igris-os/igris.git
+cd igris
+
+# Build everything
+cargo build --workspace
+
+# Verify build
+cargo test --workspace
+```
+
+## Step 3: Configure and Run Daemon
+
+### Basic Daemon (Read-Only)
+
+```bash
+# Terminal 1: Start with defaults
+./target/debug/igrisd
+```
+
+### Full-Featured Daemon (All Capabilities)
+
+```bash
+# Terminal 1: Start with all features enabled
+IGRIS_PROCESS_CONTROL=true \
+IGRIS_EVENTS=true \
+IGRIS_WRITABLE_PATHS="$HOME/.igris/share/writable" \
+./target/debug/igrisd
+```
+
+<Note>
+Create the writable directory first: `mkdir -p ~/.igris/share/writable`
+</Note>
+
+## Step 4: Test Core Operations
+
+### System Information
+
+```bash
+# Terminal 2: Test system.info
+./target/debug/igrisctl system.info
+./target/debug/igrisctl system.info --json
+```
+
+### Filesystem Operations
+
+```bash
+# Create test files
+mkdir -p ~/.igris/share/test
+echo "Hello Igris!" > ~/.igris/share/test/hello.txt
+
+# List directory
+./target/debug/igrisctl fs.list --path ~/.igris/share/test
+
+# Stat file
+./target/debug/igrisctl fs.stat --path ~/.igris/share/test/hello.txt
+
+# Read file (base64 output)
+./target/debug/igrisctl fs.read --path ~/.igris/share/test/hello.txt
+
+# Write file (requires IGRIS_WRITABLE_PATHS and --confirm)
+./target/debug/igrisctl fs.write --path ~/.igris/share/writable/new.txt --content "SGVsbG8gZnJvbSBJZ3Jpcw==" --confirm
+
+# Delete file (requires IGRIS_WRITABLE_PATHS and --confirm)
+./target/debug/igrisctl fs.delete --path ~/.igris/share/writable/new.txt --confirm
+```
+
+### Process Observation
+
+```bash
+# List processes
+./target/debug/igrisctl process.list --max 20
+
+# Get process details
+./target/debug/igrisctl process.stat --pid 1
+
+# Get children
+./target/debug/igrisctl process.children --pid 1
+```
+
+### Process Control (Requires IGRIS_PROCESS_CONTROL=true)
+
+```bash
+# Send SIGTERM (requires --confirm)
+./target/debug/igrisctl proc.signal --pid <PID> --confirm
+```
+
+### Event Observation (Requires IGRIS_EVENTS=true)
+
+<Note>
+Event observation commands are not yet available in `igrisctl`. Use raw JSON requests via the Unix socket.
+</Note>
+
+```bash
+# Example raw request structure for events.watch
+# (Requires a tool like `socat` or custom client)
+```
+
+## Step 5: Verify Audit Logging
+
+```bash
+# Check audit log (default location)
+cat ~/.local/state/igris/audit.log | jq .
+```
+
+Each line is a JSON Lines record with:
+- `timestamp`: ISO 8601 timestamp
+- `request_id`: Unique request identifier
+- `operation`: Tool name (e.g., `system.info`, `fs.read`)
+- `decision`: `allow` or `deny`
+- `result`: Coarse result (`ok`, `error`, `not_found`, etc.)
+- `peer`: Connection info
+
+## Troubleshooting
+
+### Daemon Won't Start
+
+```bash
+# Check if socket already exists
+ls -la ~/.igris/igrisd.sock
+
+# Remove stale socket
+rm -f ~/.igris/igrisd.sock
+
+# Check logs
+RUST_LOG=debug ./target/debug/igrisd
+```
+
+### Permission Denied Errors
+
+```bash
+# Ensure environment variables are set at daemon START
+IGRIS_PROCESS_CONTROL=true IGRIS_EVENTS=true ./target/debug/igrisd
+
+# Check policy grants in permission broker
+```
+
+### Socket Connection Issues
+
+```bash
+# Verify socket path
+echo $IGRIS_SOCKET_PATH
+# or default:
+ls -la $XDG_RUNTIME_DIR/igris/igrisd.sock
+ls -la ~/.igris/igrisd.sock
+
+# Test connection
+./target/debug/igrisctl system.info
+```
+
+## Next Steps
+
+- [Configuration Guide](/guides/configuration) — All environment variables
+- [Architecture Overview](/core-concepts/architecture) — System design
+- [API Reference](/api-reference/overview) — Complete tool documentation
+- [Writing Policies](/guides/writing-policies) — Custom permission policies

@@ -1,0 +1,359 @@
+---
+title: "Security Model"
+description: "Igris OS security architecture: default-deny, capabilities, confinement, and audit logging"
+---
+
+# Security Model
+
+Igris OS implements a **default-deny, capability-based security model** with multiple defense layers. Every operation must be explicitly granted—there are no ambient authorities.
+
+## Core Principles
+
+<CardGroup cols={2}>
+  <Card title="Default Deny" icon="shield">
+    Every operation is denied unless explicitly allowed by policy. No implicit permissions.
+  </Card>
+  <Card title="Structured Operations" icon="cube">
+    No raw shell, no generic file/process interfaces. Every action is a named, versioned tool.
+  </Card>
+  <Card title="Least Privilege" icon="key">
+    Each tool family is a separate capability. Grant only what's needed.
+  </Card>
+  <Card title="Explicit Confirmation" icon="alert-triangle">
+    Destructive operations (`fs.write`, `fs.delete`, `proc.signal`) require `confirm: true`.
+  </Card>
+  <Card title="Path Confinement" icon="folder-lock">
+    Filesystem operations canonicalize and verify containment within `IGRIS_FS_ROOT`.
+  </Card>
+  <Card title="Audit Everything" icon="file-text">
+    Every request creates an append-only JSON Lines audit record (no payloads/secrets).
+  </Card>
+</CardGroup>
+
+## Capability System
+
+Capabilities are **explicit, opt-in, and environment-gated**:
+
+| Capability | Tools | Environment Variable | Policy Grant |
+|------------|-------|---------------------|--------------|
+| **FS Read** | `fs.list`, `fs.stat`, `fs.read` | (always available) | `filesystem_read` |
+| **FS Write** | `fs.write`, `fs.delete` | `IGRIS_WRITABLE_PATHS` | `filesystem_write` |
+| **Process Control** | `proc.signal` | `IGRIS_PROCESS_CONTROL` | `process_control` |
+| **Event Observation** | `events.watch`, `events.poll`, `events.unwatch` | `IGRIS_EVENTS` | `event_observation` |
+
+### Capability Activation Flow
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      DAEMON STARTUP                              │
+├─────────────────────────────────────────────────────────────────┤
+│  1. Read IGRIS_WRITABLE_PATHS ──► Parse & validate paths        │
+│  2. Read IGRIS_PROCESS_CONTROL ──► Enable process_control cap   │
+│  3. Read IGRIS_EVENTS ──────────► Enable event_observation cap  │
+│  4. Register capabilities with igris-permd                       │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      REQUEST TIME                                │
+├─────────────────────────────────────────────────────────────────┤
+│  1. Client sends tool request                                    │
+│  2. igrisd routes to tool handler                                │
+│  3. Handler checks capability is enabled                         │
+│  4. Handler requests permission from igris-permd                 │
+│  5. igris-permd evaluates policy                                 │
+│  6. Decision: ALLOW / DENY                                       │
+│  7. Audit log written (always)                                   │
+│  8. If ALLOW: execute tool, return result                        │
+│  9. If DENY: return error, no execution                          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Permission Broker (`igris-permd`)
+
+The permission broker is a **separate process** implementing the policy engine.
+
+### Policy Language
+
+Policies are defined in TOML format (see [Writing Policies](/guides/writing-policies)):
+
+```toml
+# Example policy
+[policy.milestone_six]
+# Grant filesystem read to all connections
+allow = [
+  { capability = "filesystem_read" },
+]
+
+# Grant filesystem write to specific paths
+allow = [
+  { capability = "filesystem_write", paths = ["/home/user/.igris/share/writable"] },
+]
+
+# Grant process control with confirmation requirement
+allow = [
+  { capability = "process_control", require_confirm = true },
+]
+
+# Grant event observation
+allow = [
+  { capability = "event_observation" },
+]
+```
+
+### Decision Process
+
+```
+Request arrives at igris-permd
+         │
+         ▼
+┌────────────────────────────────────┐
+│  Extract: capability, operation,   │
+│  peer info (pid, uid, cmdline),    │
+│  request parameters                │
+└────────────────┬───────────────────┘
+                 │
+                 ▼
+┌────────────────────────────────────┐
+│  Match against policy rules        │
+│  (first match wins, default deny)  │
+└────────────────┬───────────────────┘
+                 │
+         ┌───────┴───────┐
+         ▼               ▼
+      ALLOW           DENY
+         │               │
+         ▼               ▼
+   Execute tool    Return error
+         │               │
+         └───────┬───────┘
+                 ▼
+        Write audit log
+```
+
+## Filesystem Confinement
+
+All `fs.*` operations are confined to `IGRIS_FS_ROOT` (default: `~/.igris/share`).
+
+### Confinement Rules
+
+1. **Canonicalization:** All paths resolved to absolute, symlink-free form
+2. **Containment Check:** Resolved path must be within `IGRIS_FS_ROOT`
+3. **Symlink Safety:** Symlink targets must also remain within root
+4. **No Directory Deletion:** `fs.delete` only works on files/symlinks
+5. **Write Allow-List:** `IGRIS_WRITABLE_PATHS` specifies permitted write directories
+
+### Path Resolution Example
+
+```
+IGRIS_FS_ROOT = /home/user/.igris/share
+
+Request: fs.read { path: "/home/user/.igris/share/../etc/passwd" }
+    │
+    ▼
+Canonicalize: /home/user/.igris/share/../etc/passwd → /etc/passwd
+    │
+    ▼
+Containment Check: /etc/passwd ⊄ /home/user/.igris/share
+    │
+    ▼
+DENIED: "path escapes filesystem root"
+```
+
+```
+Request: fs.read { path: "/home/user/.igris/share/docs/readme.md" }
+    │
+    ▼
+Canonicalize: /home/user/.igris/share/docs/readme.md
+    │
+    ▼
+Containment Check: /home/user/.igris/share/docs/readme.md ⊂ /home/user/.igris/share
+    │
+    ▼
+ALLOWED (if policy grants filesystem_read)
+```
+
+## Confirmation Requirements
+
+Destructive operations require explicit user confirmation:
+
+| Tool | Confirmation Required | Reason |
+|------|----------------------|--------|
+| `fs.write` | Yes | Creates/modifies files |
+| `fs.delete` | Yes | Removes files permanently |
+| `proc.signal` | Yes | Affects running processes |
+| `fs.read` | No | Read-only |
+| `fs.list` | No | Read-only |
+| `fs.stat` | No | Read-only |
+| `process.*` | No | Observation only |
+| `events.*` | No | Observation only |
+
+### Confirmation Flow
+
+```bash
+# Client must pass --confirm flag
+./target/debug/igrisctl fs.write \
+  --path ~/.igris/share/writable/test.txt \
+  --content "SGVsbG8=" \
+  --confirm
+```
+
+```json
+// Request includes confirm: true
+{
+  "method": "fs.write",
+  "params": {
+    "path": "...",
+    "content": "...",
+    "confirm": true
+  }
+}
+```
+
+## Audit Logging
+
+Every request produces **exactly one** audit log entry in JSON Lines format.
+
+### Log Format
+
+```json
+{
+  "timestamp": "2025-01-15T10:30:45.123456Z",
+  "request_id": "req_abc123def456",
+  "operation": "fs.write",
+  "decision": "allow",
+  "result": "ok",
+  "peer": {
+    "pid": 12345,
+    "uid": 1000,
+    "gid": 1000,
+    "cmdline": "igrisctl"
+  }
+}
+```
+
+### Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | ISO 8601 | Request receipt time (microsecond precision) |
+| `request_id` | string | Unique request identifier (UUID v4) |
+| `operation` | string | Tool name (e.g., `fs.read`, `proc.signal`) |
+| `decision` | enum | `allow` or `deny` |
+| `result` | enum | `ok`, `error`, `not_found`, `permission_denied`, `invalid_params`, `internal_error` |
+| `peer.pid` | integer | Client process ID |
+| `peer.uid` | integer | Client user ID |
+| `peer.gid` | integer | Client group ID |
+| `peer.cmdline` | string | Client command line (truncated) |
+
+### What is NOT Logged
+
+- ❌ Request parameters (paths, content, PIDs)
+- ❌ Response payloads
+- ❌ Secrets, tokens, passwords
+- ❌ File contents
+- ❌ Environment variables
+
+### Log Location
+
+Default: `$XDG_STATE_HOME/igris/audit.log` or `~/.local/state/igris/audit.log`
+
+Override: `IGRIS_AUDIT_LOG=/custom/path/audit.log`
+
+### Log Rotation
+
+Not built-in. Use standard log rotation tools:
+
+```bash
+# Example logrotate config
+/home/user/.local/state/igris/audit.log {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 user user
+}
+```
+
+## Threat Model
+
+### In Scope
+
+- Malicious or compromised AI agent
+- Malicious local user with igrisctl access
+- Buggy tools causing unintended operations
+- Policy misconfiguration
+
+### Out of Scope
+
+- Kernel exploits (assumes trusted kernel)
+- Hardware attacks
+- Network attacks (no network exposure by default)
+- Side-channel attacks
+- Compromised `igrisd` or `igris-permd` binaries
+
+### Mitigations
+
+| Threat | Mitigation |
+|--------|------------|
+| Agent tries `rm -rf /` | No shell access; only structured tools |
+| Agent reads `/etc/shadow` | Path confinement to `IGRIS_FS_ROOT` |
+| Agent kills init (PID 1) | `proc.signal` rejects self-signaling, requires confirm |
+| Agent floods events | Bounded queues (256 total, 16 per watch) |
+| Policy grants too much | Fine-grained capabilities, path allow-lists |
+| Audit log tampering | Append-only, separate process, syslog optional |
+
+
+## Related Documentation
+
+- [Architecture](/core-concepts/architecture) — Component interactions
+- [IPC Protocol](/core-concepts/ipc-protocol) — Secure communication
+- [Writing Policies](/guides/writing-policies) — Policy configuration
+- [Configuration](/guides/configuration) — Environment variables
+- [ADR 0005](/adr/0005-privilege-separation-and-default-deny) — Security model decision
+- [ADR 0007](/adr/0007-filesystem-boundary-and-read-only-tools) — Filesystem confinement decision
+
+## Sandbox Enforcement (M7)
+
+M7 adds a **sandbox enforcement layer** as a defense-in-depth measure. Even if a provider is compromised, the sandbox limits the damage.
+
+### Sandbox Layers
+
+\┌─────────────────────────────────────────────────────────────────┐
+│                    Request Flow                                  │
+├─────────────────────────────────────────────────────────────────┤
+│  1. IPC Validation (frame, JSON, schema, version)               │
+│  2. Permission Policy (igris-permd)                             │
+│  3. Capability Check (enabled + paths)                          │
+│  4. Sandbox Boundary (ProviderManager routes to provider)       │
+│  5. Sandbox Enforcement (inside provider process):              │
+│     • User namespace: UID/GID mapping, no root                  │
+│     • PID namespace: Isolated process view                      │
+│     • Network namespace: No network access                      │
+│     • IPC namespace: Isolated IPC resources                     │
+│     • UTS namespace: Isolated hostname                          │
+│     • Mount namespace: Bind mount + chroot to IGRIS_FS_ROOT     │
+│     • cgroups v2: Memory, CPU, PID limits                       │
+│     • seccomp: Minimal syscall allowlist (~50 syscalls)         │
+│  6. Tool Execution (inside sandbox)                             │
+│  8. Audit Log Write                                             │
+└─────────────────────────────────────────────────────────────────┘
+\
+### Sandbox Guarantees
+
+| Layer | Guarantee | Implementation |
+|-------|-----------|----------------|
+| **User Namespace** | No root inside sandbox; UID/GID mapped to host user | \CLONE_NEWUSER\ + uid/gid maps |
+| **PID Namespace** | Cannot see/manipulate host processes | \CLONE_NEWPID\ |
+| **Network Namespace** | Zero network access | \CLONE_NEWNET\ |
+| **IPC Namespace** | Isolated System V IPC, POSIX MQ | \CLONE_NEWIPC\ |
+| **UTS Namespace** | Isolated hostname/domainname | \CLONE_NEWUTS\ |
+| **Mount Namespace** | Filesystem confined to \IGRIS_FS_ROOT\ | \CLONE_NEWNS\ + bind mount + chroot |
+| **cgroups v2** | Resource limits enforced by kernel | \memory.max\, \cpu.max\, \pids.max\ |
+| **seccomp** | ~50 syscalls allowed; rest killed | BPF filter + \SECCOMP_FILTER_FLAG_TSYNC\ |
+
+### Failure Behavior
+
+| Failure Point | Behavior |

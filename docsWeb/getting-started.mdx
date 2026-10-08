@@ -1,0 +1,149 @@
+---
+title: "Getting Started"
+description: "Set up your development environment and run Igris OS for the first time"
+---
+
+# Getting Started
+
+This guide will help you set up Igris OS in a development environment and run your first commands.
+
+## Prerequisites
+
+<CardGroup cols={3}>
+  <Card title="Linux / WSL2" icon="terminal">
+    Development environment only. WSL2 is recommended for Windows users.
+  </Card>
+  <Card title="Rust (stable)" icon="rust">
+    Pinned via `rust-toolchain.toml`. Install via [rustup](https://rustup.rs/).
+  </Card>
+  <Card title="Python 3.10+" icon="python">
+    For the AI agent layer. Use a virtual environment.
+  </Card>
+</CardGroup>
+
+Additional requirements:
+- **GCC**, **CMake**, **pkg-config** for native integration
+- **Cargo** (comes with Rust)
+
+<Note>
+WSL2 is a **development environment**, not the final Igris OS runtime. The long-term goal is an installable Igris OS environment delivered via VM, bootable image, or suitable hardware.
+</Note>
+
+## Installation
+
+### 1. Clone the Repository
+
+```bash
+git clone https://github.com/igris-os/igris.git
+cd igris
+```
+
+### 2. Build the Rust Workspace
+
+```bash
+# Build all Rust crates
+cargo build --workspace
+
+# Run tests
+cargo test --workspace
+
+# Check formatting
+cargo fmt --all -- --check
+
+# Run clippy lints
+cargo clippy --workspace -- -D warnings
+```
+
+### 3. Set Up Python Agent Environment
+
+```bash
+# Create virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install agent package in development mode
+pip install -e ./agent
+
+# Run agent tests
+python3 -m unittest discover -s agent/tests
+```
+
+## Quick Start
+
+### Terminal 1: Start the Daemon
+
+```bash
+# Start igrisd (user-owned socket, no root required)
+./target/debug/igrisd
+```
+
+The daemon will start and listen on the default Unix socket:
+- `$XDG_RUNTIME_DIR/igris/igrisd.sock` or `~/.igris/igrisd.sock`
+
+### Terminal 2: Query the Daemon
+
+```bash
+# Get system information
+./target/debug/igrisctl system.info
+
+# Get JSON output
+./target/debug/igrisctl system.info --json
+```
+
+### Filesystem Operations
+
+```bash
+# List directory (confined to IGRIS_FS_ROOT, default ~/.igris/share)
+./target/debug/igrisctl fs.list --path ~/.igris/share
+
+# Get file metadata
+./target/debug/igrisctl fs.stat --path ~/.igris/share/some-file
+
+# Read file contents (base64-encoded, bounded)
+./target/debug/igrisctl fs.read --path ~/.igris/share/some-file --max-bytes 1024
+```
+
+### Process Observation
+
+```bash
+# List processes (bounded, PID-sorted)
+./target/debug/igrisctl process.list --max 50
+
+# Get process metadata
+./target/debug/igrisctl process.stat --pid 1
+
+# Get process children
+./target/debug/igrisctl process.children --pid 1
+```
+
+### Process Control (Requires Configuration)
+
+```bash
+# Enable process control at daemon start
+IGRIS_PROCESS_CONTROL=true ./target/debug/igrisd
+
+# In another terminal, send signal (requires --confirm)
+./target/debug/igrisctl proc.signal --pid 123 --confirm
+```
+
+## Configuration
+
+Key environment variables (all optional, secure defaults):
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `IGRIS_SOCKET_PATH` | Unix domain socket path | `$XDG_RUNTIME_DIR/igris/igrisd.sock` |
+| `IGRIS_AUDIT_LOG` | Append-only audit log path | `$XDG_STATE_HOME/igris/audit.log` |
+| `IGRIS_FS_ROOT` | Filesystem root for `fs.*` tools | `~/.igris/share` |
+| `IGRIS_WRITABLE_PATHS` | Colon-separated paths for `fs.write`/`fs.delete` | (empty) |
+| `IGRIS_PROCESS_CONTROL` | Enable `proc.signal` | `false` |
+| `IGRIS_EVENTS` | Enable event observation `events.*` | `false` |
+
+See [Configuration Guide](/guides/configuration) for details.
+
+## Next Steps
+
+- [Quick Start Guide](/guides/quick-start) — Comprehensive walkthrough
+- [Running the Daemon](/guides/running-daemon) — Daemon management
+- [Using igrisctl](/guides/using-igrisctl) — Client command reference
+- [Writing Policies](/guides/writing-policies) — Permission policy configuration

@@ -1,0 +1,505 @@
+---
+title: "Testing"
+description: "Testing strategy and guide for Igris OS"
+---
+
+# Testing
+
+Igris OS uses a multi-layered testing approach: unit tests, integration tests, and end-to-end tests.
+
+## Test Organization
+
+```
+├── core/
+│   ├── igrisd/
+│   │   ├── src/           # Unit tests inline
+│   │   └── tests/         # Integration tests
+│   ├── igrisctl/
+│   │   ├── src/
+│   │   └── tests/
+│   └── igris-permd/
+│       ├── src/
+│       └── tests/
+├── agent/
+│   └── tests/             # Python unit tests
+└── tests/                 # Cross-crate E2E tests (future)
+```
+
+---
+
+## Rust Testing
+
+### Unit Tests
+
+Inline with source code in `#[cfg(test)]` modules:
+
+```rust
+// core/igrisd/src/tools/fs.rs
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_fs_read_valid_file() {
+        let temp = TempDir::new().unwrap();
+        let file = temp.path().join("test.txt");
+        std::fs::write(&file, b"hello").unwrap();
+        
+        let result = fs_read(file.to_str().unwrap(), 1024);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content, "aGVsbG8="); // base64
+    }
+
+    #[test]
+    fn test_fs_read_nonexistent() {
+        let result = fs_read("/nonexistent", 1024);
+        assert!(matches!(result, Err(Error::NotFound)));
+    }
+}
+```
+
+### Integration Tests
+
+In `tests/` directory, testing public APIs:
+
+```rust
+// core/igrisd/tests/ipc_integration.rs
+use igrisd::{spawn_daemon, Client};
+
+#[tokio::test]
+async fn test_system_info() {
+    let (daemon, addr) = spawn_daemon().await;
+    let client = Client::connect(addr).await.unwrap();
+    
+    let info = client.system_info().await.unwrap();
+    assert!(info.kernel.version.len() > 0);
+    
+    daemon.shutdown().await;
+}
+```
+
+### Running Rust Tests
+
+```bash
+# All tests
+cargo test --workspace
+
+# Specific crate
+cargo test -p igrisd
+cargo test -p igris-permd
+
+# With output
+cargo test --workspace -- --nocapture
+
+# Specific test
+cargo test -p igrisd test_fs_read
+
+# Integration tests only
+cargo test --test integration_test
+
+# With nextest (faster)
+cargo nextest run --workspace
+```
+
+### Test Categories
+
+```bash
+# Unit tests only
+cargo test --lib --workspace
+
+# Integration tests only
+cargo test --test '*' --workspace
+
+# Doc tests
+cargo test --doc --workspace
+```
+
+---
+
+## Python Testing
+
+### Unit Tests
+
+Using standard `unittest` framework:
+
+```python
+# agent/tests/test_orchestrator.py
+import unittest
+from igris_agent.orchestrator import Orchestrator
+
+class TestOrchestrator(unittest.TestCase):
+    def setUp(self):
+        self.orchestrator = Orchestrator()
+    
+    def test_plan_creation(self):
+        plan = self.orchestrator.create_plan("list files")
+        self.assertIsNotNone(plan)
+        self.assertIn("steps", plan)
+    
+    def test_invalid_input(self):
+        with self.assertRaises(ValueError):
+            self.orchestrator.create_plan("")
+```
+
+### Running Python Tests
+
+```bash
+# Activate venv
+source .venv/bin/activate
+
+# All tests
+python3 -m unittest discover -s agent/tests -v
+
+# Specific test module
+python3 -m unittest agent.tests.test_orchestrator -v
+
+# Specific test method
+python3 -m unittest agent.tests.test_orchestrator.TestOrchestrator.test_plan_creation -v
+
+# With pytest (if installed)
+pytest agent/tests -v
+```
+
+### Python Test Configuration
+
+```toml
+# agent/pyproject.toml
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["src/igris_agent"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "def __repr__"]
+```
+
+---
+
+## Test Utilities
+
+### Test Fixtures (Rust)
+
+```rust
+// core/igrisd/tests/common/mod.rs
+use igrisd::Daemon;
+use tempfile::TempDir;
+
+pub struct TestEnv {
+    pub daemon: Daemon,
+    pub fs_root: TempDir,
+    pub writable: TempDir,
+}
+
+impl TestEnv {
+    pub async fn new() -> Self {
+        let fs_root = TempDir::new().unwrap();
+        let writable = TempDir::new().unwrap();
+        
+        let daemon = Daemon::builder()
+            .fs_root(fs_root.path().to_path_buf())
+            .writable_paths(vec![writable.path().to_path_buf()])
+            .process_control(true)
+            .events(true)
+            .spawn()
+            .await
+            .unwrap();
+        
+        Self { daemon, fs_root, writable }
+    }
+}
+```
+
+### Test Client Helper
+
+```rust
+// core/igrisctl/tests/common/mod.rs
+use igrisctl::Client;
+
+pub async fn test_client() -> Client {
+    Client::connect_from_env().await.unwrap()
+}
+```
+
+---
+
+## End-to-End Testing
+
+### Daemon Lifecycle Tests
+
+```bash
+#!/bin/bash
+# tests/e2e/daemon_lifecycle.sh
+
+set -euo pipefail
+
+DAEMON="./target/debug/igrisd"
+CLIENT="./target/debug/igrisctl"
+
+# Start daemon
+$DAEMON &
+DAEMON_PID=$!
+
+sleep 1
+
+# Test basic connectivity
+$CLIENT system.info --json | jq -e '.result.kernel.version' > /dev/null
+
+# Test filesystem
+$CLIENT fs.list --path ~/.igris/share --json | jq -e '.result.entries' > /dev/null
+
+# Test process
+$CLIENT process.list --json | jq -e '.result.processes' > /dev/null
+
+# Stop daemon
+kill $DAEMON_PID
+wait $DAEMON_PID 2>/dev/null
+
+echo "✅ E2E tests passed"
+```
+
+### Permission Tests
+
+```bash
+#!/bin/bash
+# tests/e2e/permissions.sh
+
+set -euo pipefail
+
+DAEMON="./target/debug/igrisd"
+CLIENT="./target/debug/igrisctl"
+
+# Test without write capability
+$DAEMON &
+PID=$!
+sleep 1
+
+# Should fail
+$CLIENT fs.write --path ~/.igris/share/test.txt --content "dGVzdA==" --confirm 2>&1 | grep -q "CAPABILITY_NOT_ENABLED"
+echo "✅ Write correctly denied without capability"
+
+kill $PID
+
+# Test with write capability
+IGRIS_WRITABLE_PATHS=~/.igris/share/writable $DAEMON &
+PID=$!
+sleep 1
+
+mkdir -p ~/.igris/share/writable
+$CLIENT fs.write --path ~/.igris/share/writable/test.txt --content "dGVzdA==" --confirm --json | jq -e '.result.written' > /dev/null
+echo "✅ Write allowed with capability"
+
+kill $PID
+```
+
+---
+
+## Property-Based Testing
+
+### Using proptest (Rust)
+
+```rust
+// In Cargo.toml dev-dependencies
+proptest = "1.0"
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_path_canonicalization_doesnt_panic(path in "\\PC*") {
+            let _ = std::path::Path::new(&path).canonicalize();
+        }
+    }
+}
+```
+
+---
+
+## Fuzzing
+
+### Using cargo-fuzz
+
+```bash
+# Install
+cargo install cargo-fuzz
+
+# Initialize
+cargo fuzz init
+
+# Add target
+# fuzz/fuzz_targets/parse_request.rs
+```
+
+```rust
+// fuzz/fuzz_targets/parse_request.rs
+#![no_main]
+use libfuzzer_sys::fuzz_target;
+use igris_ipc::Request;
+
+fuzz_target!(|data: &[u8]| {
+    if let Ok(req) = serde_json::from_slice::<Request>(data) {
+        let _ = req.validate();
+    }
+});
+```
+
+```bash
+# Run fuzzing
+cargo fuzz run parse_request
+```
+
+---
+
+## CI Test Pipeline
+
+### GitHub Actions
+
+```yaml
+# .github/workflows/test.yml
+name: Test
+
+on: [push, pull_request]
+
+jobs:
+  rust-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Run tests
+        run: cargo test --workspace
+      - name: Run clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -e ./agent pytest pytest-cov
+      - name: Run tests
+        run: pytest agent/tests --cov=igris_agent --cov-report=xml
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+
+  e2e-tests:
+    runs-on: ubuntu-latest
+    needs: [rust-tests]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release --workspace
+      - name: Run E2E tests
+        run: |
+          chmod +x tests/e2e/*.sh
+          tests/e2e/daemon_lifecycle.sh
+          tests/e2e/permissions.sh
+```
+
+---
+
+## Coverage
+
+### Rust Coverage
+
+```bash
+# Install grcov
+cargo install grcov
+
+# Generate coverage
+CARGO_INCREMENTAL=0 RUSTFLAGS="-Cinstrument-coverage" \
+  cargo test --workspace --no-run
+
+# Run tests with coverage
+LLVM_PROFILE_FILE="coverage/%p-%m.profraw" \
+  cargo test --workspace
+
+# Generate report
+grcov . --binary-path ./target/debug/deps -s . -t html --branch --ignore-not-existing -o coverage/html
+```
+
+### Python Coverage
+
+```bash
+pytest agent/tests --cov=igris_agent --cov-report=html --cov-report=term
+```
+
+---
+
+## Benchmarking
+
+### Criterion (Rust)
+
+```toml
+# Cargo.toml
+[[bench]]
+name = "ipc_bench"
+harness = false
+```
+
+```rust
+// benches/ipc_bench.rs
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use igris_ipc::{Request, Response};
+
+fn bench_request_serialization(c: &mut Criterion) {
+    let req = Request::new("fs.read", json!({ "path": "/test", "max_bytes": 1024 }));
+    
+    c.bench_function("serialize request", |b| {
+        b.iter(|| serde_json::to_vec(black_box(&req)).unwrap())
+    });
+}
+
+criterion_group!(benches, bench_request_serialization);
+criterion_main!(benches);
+```
+
+```bash
+# Run benchmarks
+cargo bench --workspace
+```
+
+---
+
+## Test Checklist
+
+Before submitting PR:
+
+- [ ] `cargo fmt --all -- --check` passes
+- [ ] `cargo clippy --workspace -- -D warnings` passes
+- [ ] `cargo test --workspace` passes
+- [ ] `python3 -m unittest discover -s agent/tests` passes
+- [ ] New code has unit tests
+- [ ] New features have integration tests
+- [ ] Edge cases covered (empty input, max bounds, errors)
+- [ ] Error paths tested
+- [ ] Concurrency tested (if applicable)
+
+---
+
+## Related
+
+- [Development Setup](/development/setup) — Environment setup
+- [Contributing](/development/contributing) — Contribution guidelines
+- [Code Style](/development/code-style) — Coding standards
+- [Building from Source](/guides/building-from-source) — Build details

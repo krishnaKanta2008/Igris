@@ -1,0 +1,311 @@
+---
+title: "System Architecture"
+description: "Deep dive into Igris OS architecture and component interactions"
+---
+
+# System Architecture
+
+Igris OS follows a layered architecture with strict boundaries between components. Each layer communicates only with adjacent layers through well-defined interfaces.
+
+## Layer Overview
+
+```
+┌─────────────────────────────────────┐
+│           User / AI Agent           │  ← Python (agent/)
+├─────────────────────────────────────┤
+│    Permission / Security Layer      │  ← Rust (core/igris-permd)
+├─────────────────────────────────────┤
+│      Igris Core Services            │  ← Rust (core/igrisd) [router]
+├─────────────────────────────────────┤
+│     Sandbox Boundary                │  ← namespaces, cgroups, seccomp
+├─────────────────────────────────────┤
+│     Sandboxed Providers             │  ← fs, process, system, events
+├─────────────────────────────────────┤
+│     Linux System Services           │  ← procfs, sysfs, inotify, cgroups
+├─────────────────────────────────────┤
+│           Linux Kernel              │
+├─────────────────────────────────────┤
+│            Hardware                 │
+└─────────────────────────────────────┘
+```
+
+## Component Details
+
+### 1. AI Agent Layer (`agent/`)
+
+**Language:** Python 3.10+
+
+**Responsibilities:**
+- Orchestration and planning
+- Memory management
+- Model abstraction (LLM providers)
+- Tool invocation decisions
+- User interaction
+
+**Key Characteristics:**
+- Never executes raw shell commands
+- Invokes structured tools via IPC
+- Subject to permission policies
+- Phase 0 scaffold (not yet production-ready)
+
+### 2. Permission Broker (`core/igris-permd`)
+
+**Language:** Rust
+
+**Responsibilities:**
+- Default-deny policy enforcement
+- Policy evaluation and decision making
+- Capability management
+- Audit logging coordination
+
+**Key Characteristics:**
+- Separate process from `igrisd`
+- Communicates via Unix socket
+- Policy language for fine-grained control
+- No direct system access
+
+### 3. Core Daemon (`core/igrisd`)
+
+**Language:** Rust
+
+**Responsibilities:**
+- IPC protocol handling
+- Permission policy evaluation via `igris-permd`
+- Request routing to sandboxed providers
+- Connection lifecycle management
+- Provider lifecycle management (spawn, monitor, shutdown)
+- Audit log writing
+
+**Key Characteristics:**
+- Single-threaded async (tokio)
+- Unix domain socket server
+- Versioned JSON protocol
+- Privileged operations boundary (spawns sandboxed providers)
+- Does NOT execute tool logic directly; routes to sandboxed providers
+
+### 4. Sandboxed Providers (`core/igris-providers`)
+
+Each provider runs in its own isolated process with Linux sandboxing:
+
+| Provider | Binary | Capability | Operations |
+|----------|--------|------------|------------|
+| **Filesystem** | `igris-fs-provider` | `filesystem_read`, `filesystem_write` | `fs.list`, `fs.stat`, `fs.read`, `fs.write`, `fs.delete` |
+| **Process** | `igris-process-provider` | `process_control` | `process.list`, `process.stat`, `process.children`, `proc.signal` |
+| **System** | `igris-system-provider` | (always available) | `system.info` |
+| **Events** | `igris-events-provider` | `event_observation` | `events.watch`, `events.poll`, `events.unwatch` |
+
+**Sandbox Isolation (per provider):**
+- **User namespace**: UID/GID mapping, no root inside sandbox
+- **PID namespace**: Isolated process view
+- **Network namespace**: No network access
+- **IPC namespace**: Isolated IPC resources
+- **UTS namespace**: Isolated hostname
+- **Mount namespace**: Filesystem containment via bind mounts + chroot to `IGRIS_FS_ROOT`
+- **cgroups v2**: Memory limit, CPU quota, PID limit
+- **seccomp**: Minimal syscall allowlist (~50 syscalls)
+
+**Provider Communication:**
+- Each provider listens on a Unix domain socket under `.igris-providers/` directory
+- `igrisd` routes requests via Unix socket to the appropriate provider
+- Providers use the same JSON protocol as client ↔ igrisd
+- Provider lifecycle managed by `igrisd` (spawn, monitor, shutdown)
+
+### 5. Client CLI (`core/igrisctl`)
+
+**Language:** Rust
+
+**Responsibilities:**
+- User-facing command interface
+- JSON request construction
+- Response formatting (human/JSON)
+- Configuration via environment
+
+## Communication Flow
+
+### Request Flow
+
+```
+User/Agent
+    │
+    ▼
+igrisctl (or direct socket)
+    │
+    ▼
+┌──────────────────┐
+│   igrisd         │──► Permission Check ──► igris-permd
+│  (router)        │◄── Allow/Deny ────────┤
+└────────┬─────────┘
+         │
+         ▼
+┌─────────────────────────────────┐
+│      ProviderManager            │
+│  ┌───────────────────────────┐  │
+│  │  fs-provider    (socket)  │  │
+│  │  process-provider(socket) │  │
+│  │  system-provider(socket)  │  │
+│  │  events-provider(socket)  │  │
+│  └───────────────────────────┘  │
+└──────────────────┬──────────────┘
+                   │
+                   ▼
+           Sandboxed Provider
+                   │
+                   ▼
+            Tool Execution
+                   │
+                   ▼
+            Audit Log Write
+                   │
+                   ▼
+              Response
+```
+
+### Protocol Details
+
+- **Transport:** Unix Domain Sockets (AF_UNIX, SOCK_STREAM)
+- **Serialization:** JSON (UTF-8)
+- **Framing:** Length-prefixed (4-byte big-endian)
+- **Versioning:** Protocol version in handshake
+
+See [IPC Protocol Specification](/core-concepts/ipc-protocol) for details.
+
+## Security Boundaries
+
+### Process Isolation
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    User Session                              │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
+│  │   igrisctl  │  │   igrisctl  │  │    AI Agent         │  │
+│  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘  │
+│         │                │                      │            │
+└─────────┼────────────────┼──────────────────────┼────────────┘
+          ▼                ▼                      ▼
+┌─────────────────────────────────────────────────────────────┐
+│                     igrisd (router)                          │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │              Connection Handler                      │    │
+│  │  ┌─────────────────────────────────────────────┐    │    │
+│  │  │             ProviderManager                  │    │    │
+│  │  │  ┌─────────────────────────────────────┐    │    │    │
+│  │  │  │  fs-provider    (Unix socket)       │    │    │    │
+│  │  │  │  process-provider (Unix socket)     │    │    │    │
+│  │  │  │  system-provider (Unix socket)      │    │    │    │
+│  │  │  │  events-provider (Unix socket)      │    │    │    │
+│  │  │  └─────────────────────────────────────┘    │    │    │
+│  │  └─────────────────────────────────────────────┘    │    │
+│  └─────────────────────────────────────────────┼────────┘    │
+└─────────────────────────────────────────────────┼────────────┘
+                  ▼                               ▼
+         ┌─────────────────────┐          ┌─────────────────────┐
+         │   fs-provider       │          │  process-provider   │
+         │  [sandboxed]        │          │  [sandboxed]        │
+         │  namespaces         │          │  namespaces         │
+         │  cgroups            │          │  cgroups            │
+         │  seccomp            │          │  seccomp            │
+         └─────────┬───────────┘          └─────────┬───────────┘
+                   ▼                               ▼
+         ┌─────────────────────┐          ┌─────────────────────┐
+         │   system-provider   │          │  events-provider    │
+         │   [sandboxed]       │          │   [sandboxed]       │
+         │  namespaces         │          │  namespaces         │
+         │  cgroups            │          │  cgroups            │
+         │  seccomp            │          │  seccomp            │
+         └─────────┬───────────┘          └─────────┬───────────┘
+                   ▼                               ▼
+         ┌─────────────────────────────────────────────────┐
+         │            Linux Kernel / System                │
+         │  /proc  /sys  inotify  cgroups  seccomp  D-Bus  │
+         └─────────────────────────────────────────────────┘
+```
+
+### Capability Model
+
+Each tool family requires explicit capability grants:
+
+| Capability | Environment Variable | Tools |
+|------------|---------------------|-------|
+| Filesystem Read | (default) | `fs.list`, `fs.stat`, `fs.read` |
+| Filesystem Write | `IGRIS_WRITABLE_PATHS` | `fs.write`, `fs.delete` |
+| Process Control | `IGRIS_PROCESS_CONTROL` | `proc.signal` |
+| Event Observation | `IGRIS_EVENTS` | `events.watch`, `events.poll`, `events.unwatch` |
+
+## Data Flow Examples
+
+### File Read Request
+
+```json
+// Request
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "fs.read",
+  "params": {
+    "path": "/home/user/.igris/share/file.txt",
+    "max_bytes": 1024
+  }
+}
+
+// Response (success)
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": "SGVsbG8gV29ybGQ=",
+    "truncated": false
+  }
+}
+
+// Response (denied)
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "Permission denied",
+    "data": { "reason": "path_not_allowed" }
+  }
+}
+```
+
+### Audit Log Entry
+
+```json
+{
+  "timestamp": "2025-01-15T10:30:45.123Z",
+  "request_id": "req_abc123",
+  "operation": "fs.read",
+  "decision": "allow",
+  "result": "ok",
+  "peer": {
+    "pid": 12345,
+    "uid": 1000,
+    "cmdline": "igrisctl"
+  }
+}
+```
+
+## Scalability Considerations
+
+- **Connection Limits:** Default 100 concurrent connections
+- **Watch Limits:** 16 watches per connection, 256 queued events total
+- **Request Bounds:** Max 4KB request, 1MB response
+- **Rate Limiting:** Per-connection token bucket (configurable)
+
+## Failure Modes
+
+| Component Failure | Behavior |
+|-------------------|----------|
+| `igris-permd` down | `igrisd` denies all requests (fail-closed) |
+| `igrisd` crash | Connections closed, watches cleaned up |
+| Audit log full | Requests blocked until space available |
+| Socket permission error | Clear error to client, no silent failures |
+
+## Related Documentation
+
+- [Security Model](/core-concepts/security-model) — Detailed permission system
+- [IPC Protocol](/core-concepts/ipc-protocol) — Wire protocol specification
+- [Event System](/core-concepts/event-system) — Event observation architecture
+- [ADR 0006](/adr/0006-unix-socket-ipc-boundary) — IPC boundary decision
+- [ADR 0005](/adr/0005-privilege-separation-and-default-deny) — Security model decision

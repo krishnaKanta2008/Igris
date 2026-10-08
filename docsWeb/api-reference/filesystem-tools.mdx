@@ -1,0 +1,364 @@
+---
+title: "Filesystem Tools"
+description: "Reference for filesystem operations: fs.list, fs.stat, fs.read, fs.write, fs.delete"
+---
+
+# Filesystem Tools
+
+All filesystem operations are **confined to `IGRIS_FS_ROOT`** (default: `~/.igris/share`).
+
+## Capabilities
+
+| Tool | Capability | Environment Variable |
+|------|------------|---------------------|
+| `fs.list`, `fs.stat`, `fs.read` | `filesystem_read` | (default, always) |
+| `fs.write`, `fs.delete` | `filesystem_write` | `IGRIS_WRITABLE_PATHS` |
+
+## Path Rules
+
+- All paths **must be absolute**
+- Paths **must be within `IGRIS_FS_ROOT`** (canonicalized)
+- Symlink targets **must also remain within root**
+- No directory traversal (`..` resolved before check)
+
+---
+
+## fs.list
+
+List directory entries with optional limit.
+
+### Parameters
+
+```json
+{
+  "path": "/absolute/path/within/root",
+  "max_entries": 100
+}
+```
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | string | Yes | — | Absolute directory path |
+| `max_entries` | integer | No | 1000 | Maximum entries to return (max 10000) |
+
+### Response
+
+```json
+{
+  "entries": [
+    { "name": "file.txt", "type": "file", "size": 1024 },
+    { "name": "subdir", "type": "directory", "size": 4096 },
+    { "name": "link.txt", "type": "symlink", "size": 12, "target": "file.txt" }
+  ],
+  "truncated": false
+}
+```
+
+### Entry Types
+
+| Type | Description | Fields |
+|------|-------------|--------|
+| `file` | Regular file | `name`, `type`, `size` |
+| `directory` | Directory | `name`, `type`, `size` |
+| `symlink` | Symbolic link | `name`, `type`, `size`, `target` |
+| `other` | Block/char device, FIFO, socket | `name`, `type`, `size` |
+
+### Errors
+
+- `-32002` — Path not within `IGRIS_FS_ROOT`
+- `-32005` — Path not found / not a directory
+- `-32602` — Invalid `max_entries` (negative or > 10000)
+
+### igrisctl
+
+```bash
+./target/debug/igrisctl fs.list --path ~/.igris/share [--max-entries 100]
+```
+
+---
+
+## fs.stat
+
+Get file metadata.
+
+### Parameters
+
+```json
+{
+  "path": "/absolute/path/within/root"
+}
+```
+
+### Response
+
+```json
+{
+  "type": "file",
+  "size": 1024,
+  "mode": 33188,
+  "uid": 1000,
+  "gid": 1000,
+  "mtime": "2025-01-15T10:30:45Z",
+  "atime": "2025-01-15T10:30:45Z",
+  "ctime": "2025-01-15T10:30:45Z"
+}
+```
+
+### Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | string | `file`, `directory`, `symlink`, `block`, `char`, `fifo`, `socket` |
+| `size` | integer | Size in bytes |
+| `mode` | integer | File mode (octal, e.g., `33188` = `0o644`) |
+| `uid` | integer | Owner user ID |
+| `gid` | integer | Owner group ID |
+| `mtime` | ISO 8601 | Last modification time |
+| `atime` | ISO 8601 | Last access time |
+| `ctime` | ISO 8601 | Last status change time |
+
+### Errors
+
+- `-32002` — Path not within `IGRIS_FS_ROOT`
+- `-32005` — Path not found
+
+### igrisctl
+
+```bash
+./target/debug/igrisctl fs.stat --path ~/.igris/share/file.txt
+```
+
+---
+
+## fs.read
+
+Read file contents as base64.
+
+### Parameters
+
+```json
+{
+  "path": "/absolute/path/within/root",
+  "max_bytes": 4096
+}
+```
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `path` | string | Yes | — | Absolute file path |
+| `max_bytes` | integer | No | 65536 | Max bytes to read (max 1048576 = 1MB) |
+
+### Response
+
+```json
+{
+  "content": "SGVsbG8gV29ybGQ=",
+  "truncated": false
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `content` | string | Base64-encoded file contents |
+| `truncated` | boolean | `true` if file larger than `max_bytes` |
+
+### Errors
+
+- `-32002` — Path not within `IGRIS_FS_ROOT`
+- `-32005` — Path not found / not a regular file
+- `-32602` — Invalid `max_bytes` (negative or > 1MB)
+
+### igrisctl
+
+```bash
+./target/debug/igrisctl fs.read --path ~/.igris/share/file.txt [--max-bytes 1024]
+```
+
+---
+
+## fs.write
+
+Create or replace a regular file with base64 content.
+
+### Capability
+
+Requires `filesystem_write` capability (`IGRIS_WRITABLE_PATHS` must be set at daemon start).
+
+### Parameters
+
+```json
+{
+  "path": "/absolute/path/within/writable/root",
+  "content": "base64-encoded-content",
+  "confirm": true
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Absolute file path (must be in `IGRIS_WRITABLE_PATHS`) |
+| `content` | string | Yes | Base64-encoded content |
+| `confirm` | boolean | Yes | Must be `true` |
+
+### Response
+
+```json
+{
+  "written": 1024
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `written` | integer | Bytes written |
+
+### Constraints
+
+- Path must be within `IGRIS_WRITABLE_PATHS` (subdirectory of `IGRIS_FS_ROOT`)
+- Creates parent directories if needed
+- Overwrites existing file (no append mode)
+- Maximum content size: 1 MB (decoded)
+- Atomic write (temp file + rename)
+
+### Errors
+
+- `-32001` — `filesystem_write` capability not enabled
+- `-32002` — Path not within `IGRIS_WRITABLE_PATHS`
+- `-32003` — `confirm: true` required
+- `-32602` — Invalid base64 content or too large
+- `-32005` — Parent directory not found / not writable
+
+### igrisctl
+
+```bash
+# Content must be base64
+echo "Hello World" | base64
+# SGVsbG8gV29ybGQK
+
+./target/debug/igrisctl fs.write \
+  --path ~/.igris/share/writable/new.txt \
+  --content "SGVsbG8gV29ybGQK" \
+  --confirm
+```
+
+---
+
+## fs.delete
+
+Remove a regular file or symlink.
+
+### Capability
+
+Requires `filesystem_write` capability (`IGRIS_WRITABLE_PATHS` must be set at daemon start).
+
+### Parameters
+
+```json
+{
+  "path": "/absolute/path/within/writable/root",
+  "confirm": true
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `path` | string | Yes | Absolute file/symlink path (must be in `IGRIS_WRITABLE_PATHS`) |
+| `confirm` | boolean | Yes | Must be `true` |
+
+### Response
+
+```json
+{
+  "deleted": true
+}
+```
+
+### Constraints
+
+- Path must be within `IGRIS_WRITABLE_PATHS`
+- **Cannot delete directories** (use `fs.list` + iterate)
+- Only regular files and symlinks
+- Symlink deletion removes the link, not the target
+
+### Errors
+
+- `-32001` — `filesystem_write` capability not enabled
+- `-32002` — Path not within `IGRIS_WRITABLE_PATHS`
+- `-32003` — `confirm: true` required
+- `-32005` — Path not found / is a directory / not permitted
+
+### igrisctl
+
+```bash
+./target/debug/igrisctl fs.delete --path ~/.igris/share/writable/old.txt --confirm
+```
+
+---
+
+## Complete Example Session
+
+```bash
+# 1. Start daemon with write capability
+mkdir -p ~/.igris/share/writable
+IGRIS_WRITABLE_PATHS=~/.igris/share/writable ./target/debug/igrisd &
+
+# 2. List root
+./target/debug/igrisctl fs.list --path ~/.igris/share
+
+# 3. Create a file
+echo "Hello Igris" | base64
+# SGVsbG8gS3JpcyAK
+
+./target/debug/igrisctl fs.write \
+  --path ~/.igris/share/writable/greeting.txt \
+  --content "SGVsbG8gS3JpcyAK" \
+  --confirm
+
+# 4. Read it back
+./target/debug/igrisctl fs.read --path ~/.igris/share/writable/greeting.txt
+# content: "SGVsbG8gS3JpcyAK" (base64)
+# truncated: false
+
+# 5. Check metadata
+./target/debug/igrisctl fs.stat --path ~/.igris/share/writable/greeting.txt
+
+# 6. Delete it
+./target/debug/igrisctl fs.delete --path ~/.igris/share/writable/greeting.txt --confirm
+```
+
+## Symlink Handling
+
+| Operation | Symlink Behavior |
+|-----------|------------------|
+| `fs.list` | Shows symlink entry with `target` field |
+| `fs.stat` | Returns symlink metadata (not target) |
+| `fs.read` | **Follows symlink** (target must be in root) |
+| `fs.write` | **Replaces symlink** with regular file |
+| `fs.delete` | **Deletes symlink** (not target) |
+
+### Symlink Confinement
+
+```
+IGRIS_FS_ROOT = /home/user/.igris/share
+
+link → /home/user/.igris/share/target.txt     ✅ Allowed (target in root)
+link → /home/user/.igris/share/sub/target.txt ✅ Allowed (target in root)
+link → /etc/passwd                             ❌ Denied (target outside root)
+link → ../outside.txt                          ❌ Denied (canonicalized outside)
+```
+
+## Limits Summary
+
+| Limit | Value |
+|-------|-------|
+| Max `fs.list` entries | 10,000 |
+| Max `fs.read` bytes | 1 MB |
+| Max `fs.write` content | 1 MB (decoded) |
+| Max path length | 4096 bytes |
+| `IGRIS_WRITABLE_PATHS` entries | 16 (colon-separated) |
+
+## Related
+
+- [Security Model](/core-concepts/security-model) — Confinement details
+- [Configuration](/guides/configuration) — `IGRIS_FS_ROOT`, `IGRIS_WRITABLE_PATHS`
+- [Quick Start](/quick-start) — Hands-on examples

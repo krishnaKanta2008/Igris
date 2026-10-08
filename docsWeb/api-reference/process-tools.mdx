@@ -1,0 +1,352 @@
+---
+title: "Process Tools"
+description: "Reference for process observation and control: process.list, process.stat, process.children, proc.signal"
+---
+
+# Process Tools
+
+Process tools provide **read-only observation** of system processes via `/proc`. Process control (`proc.signal`) requires explicit capability.
+
+## Capabilities
+
+| Tool | Capability | Environment Variable |
+|------|------------|---------------------|
+| `process.list`, `process.stat`, `process.children` | (none) | — |
+| `proc.signal` | `process_control` | `IGRIS_PROCESS_CONTROL` |
+
+## Data Source
+
+All process data comes from **`/proc` filesystem only**:
+- `/proc/[pid]/stat` — Core metadata
+- `/proc/[pid]/status` — UID/GID, memory
+- `/proc/[pid]/comm` — Process name
+
+**Not exposed:** `cmdline`, `environ`, `exe`, `cwd`, `root`, `fd/*`, `cgroup`, `wchan`
+
+---
+
+## process.list
+
+Get a bounded, PID-sorted snapshot of all processes.
+
+### Parameters
+
+```json
+{
+  "max": 50
+}
+```
+
+| Parameter | Type | Required | Default | Max |
+|-----------|------|----------|---------|-----|
+| `max` | integer | No | 100 | 1000 |
+
+### Response
+
+```json
+{
+  "processes": [
+    {
+      "pid": 1,
+      "ppid": 0,
+      "name": "systemd",
+      "state": "S",
+      "uid": 0,
+      "gid": 0,
+      "rss_kb": 15724
+    },
+    {
+      "pid": 123,
+      "ppid": 1,
+      "name": "nginx",
+      "state": "S",
+      "uid": 33,
+      "gid": 33,
+      "rss_kb": 8192
+    }
+  ],
+  "truncated": false
+}
+```
+
+### Process Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `pid` | integer | Process ID |
+| `ppid` | integer | Parent process ID |
+| `name` | string | Process name (from `/proc/[pid]/comm`, truncated to 15 chars) |
+| `state` | string | Single-char state: `R` (running), `S` (sleeping), `D` (disk sleep), `Z` (zombie), `T` (stopped), `t` (tracing), `X` (dead) |
+| `uid` | integer | Real user ID |
+| `gid` | integer | Real group ID |
+| `rss_kb` | integer | Resident Set Size in KB |
+
+### Errors
+
+- `-32602` — Invalid `max` (negative or > 1000)
+
+### igrisctl
+
+```bash
+./target/debug/igrisctl process.list [--max 50]
+```
+
+---
+
+## process.stat
+
+Get detailed metadata for a single process.
+
+### Parameters
+
+```json
+{
+  "pid": 123
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pid` | integer | Yes | Target process ID |
+
+### Response
+
+```json
+{
+  "pid": 123,
+  "ppid": 1,
+  "name": "nginx",
+  "state": "S",
+  "uid": 33,
+  "gid": 33,
+  "rss_kb": 8192
+}
+```
+
+### Fields
+
+Same as `process.list` entry.
+
+### Errors
+
+- `-32005` — Process not found (PID doesn't exist or access denied)
+- `-32602` — Invalid PID (negative, zero, or > 4194304)
+
+### igrisctl
+
+```bash
+./target/debug/igrisctl process.stat --pid 123
+```
+
+---
+
+## process.children
+
+Get direct children of a process (not recursive descendants).
+
+### Parameters
+
+```json
+{
+  "pid": 1
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pid` | integer | Yes | Parent process ID |
+
+### Response
+
+```json
+{
+  "children": [
+    {
+      "pid": 123,
+      "ppid": 1,
+      "name": "nginx",
+      "state": "S",
+      "uid": 33,
+      "gid": 33,
+      "rss_kb": 8192
+    },
+    {
+      "pid": 456,
+      "ppid": 1,
+      "name": "sshd",
+      "state": "S",
+      "uid": 0,
+      "gid": 0,
+      "rss_kb": 4096
+    }
+  ]
+}
+```
+
+### Notes
+
+- Returns **direct children only** (not grandchildren)
+- Ordered by PID ascending
+- Empty array if no children or process not found
+
+### Errors
+
+- `-32005` — Parent process not found
+- `-32602` — Invalid PID
+
+### igrisctl
+
+```bash
+./target/debug/igrisctl process.children --pid 1
+```
+
+---
+
+## proc.signal
+
+Send **SIGTERM** to a process.
+
+### Capability
+
+Requires `process_control` capability (`IGRIS_PROCESS_CONTROL=true` at daemon start).
+
+### Parameters
+
+```json
+{
+  "pid": 123,
+  "confirm": true
+}
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `pid` | integer | Yes | Target process ID |
+| `confirm` | boolean | Yes | Must be `true` |
+
+### Response
+
+```json
+{
+  "signaled": true
+}
+```
+
+### Constraints
+
+- **Only SIGTERM** (signal 15) supported
+- **Self-signaling rejected** (cannot signal `igrisd` itself)
+- **OS permissions enforced** (must have kill permission per `kill(2)`)
+- Requires `confirm: true` (explicit user intent)
+
+### Errors
+
+- `-32001` — `process_control` capability not enabled
+- `-32003` — `confirm: true` required
+- `-32005` — Process not found / cannot signal (permissions) / self-signaling
+- `-32602` — Invalid PID
+
+### igrisctl
+
+```bash
+# Start daemon with process control
+IGRIS_PROCESS_CONTROL=true ./target/debug/igrisd &
+
+# Signal a process
+./target/debug/igrisctl proc.signal --pid 123 --confirm
+```
+
+---
+
+## Process State Reference
+
+| State | Char | Description |
+|-------|------|-------------|
+| Running | `R` | Running or runnable (on run queue) |
+| Sleeping | `S` | Interruptible sleep (waiting for event) |
+| Disk Sleep | `D` | Uninterruptible sleep (I/O) |
+| Zombie | `Z` | Terminated, not reaped by parent |
+| Stopped | `T` | Stopped by job control signal |
+| Tracing | `t` | Being traced (ptrace) |
+| Dead | `X` | Should never be seen |
+
+---
+
+## Example Session
+
+```bash
+# 1. List processes
+./target/debug/igrisctl process.list --max 20
+
+# Output:
+# PID    PPID   NAME         STATE  UID   GID   RSS_KB
+# 1      0      systemd      S      0     0     15724
+# 123    1      nginx        S      33    33    8192
+# 456    1      sshd         S      0     0     4096
+
+# 2. Get details for nginx
+./target/debug/igrisctl process.stat --pid 123
+
+# Output:
+# PID: 123
+# PPID: 1
+# Name: nginx
+# State: S (sleeping)
+# UID: 33
+# GID: 33
+# RSS: 8192 KB
+
+# 3. Get children of init
+./target/debug/igrisctl process.children --pid 1
+
+# 4. Enable process control and signal
+IGRIS_PROCESS_CONTROL=true ./target/debug/igrisd &
+./target/debug/igrisctl proc.signal --pid 9999 --confirm
+```
+
+---
+
+## Security Notes
+
+### What You CAN See
+
+- All processes on the system (subject to `/proc` permissions)
+- PID, PPID, name, state, UID, GID, RSS
+- Parent-child relationships (direct only)
+
+### What You CANNOT See
+
+- ❌ Command line arguments (`/proc/[pid]/cmdline`)
+- ❌ Environment variables (`/proc/[pid]/environ`)
+- ❌ Executable path (`/proc/[pid]/exe`)
+- ❌ Working directory (`/proc/[pid]/cwd`)
+- ❌ Root directory (`/proc/[pid]/root`)
+- ❌ File descriptors (`/proc/[pid]/fd/`)
+- ❌ Cgroup membership
+- ❌ Wait channel (`wchan`)
+- ❌ Threads (only thread group leader shown)
+- ❌ CPU time, start time, priority, nice
+
+### Signal Restrictions
+
+- Only SIGTERM (graceful termination)
+- No SIGKILL, SIGSTOP, SIGCONT, etc.
+- Self-protection: `igrisd` cannot signal itself
+- Standard Linux permission model applies (UID match or CAP_KILL)
+
+---
+
+## Limits
+
+| Limit | Value |
+|-------|-------|
+| `process.list` max | 1000 |
+| PID max | 4194304 (kernel `pid_max`) |
+| `proc.signal` rate | No built-in rate limit (policy can restrict) |
+
+## Related
+
+- [Security Model](/core-concepts/security-model) — Capability system
+- [Configuration](/guides/configuration) — `IGRIS_PROCESS_CONTROL`
+- [Quick Start](/quick-start) — Hands-on examples
+- [ADR 0008](/adr/0008-process-observation-and-proc-boundary) — Process boundary decision

@@ -1,29 +1,29 @@
 [package]
-name = "igrisd"
-description = "Igris core service daemon: privileged IPC hub routing to narrowly scoped providers."
+name = "igris-sandbox"
+description = "Igris provider sandbox: namespace, cgroup, and seccomp isolation for provider processes."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 
 [lib]
-name = "igrisd"
+name = "igris_sandbox"
 path = "src/lib.rs"
 
 [[bin]]
-name = "igrisd"
+name = "igris-sandbox"
 path = "src/main.rs"
 
 [dependencies]
 igris-proto.workspace = true
-igris-permd.workspace = true
-igris-sandbox.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 libc = "0.2"
-inotify = "0.10"
+nix = { version = "0.29", features = ["sched", "user", "mount", "process"] }
+thiserror = "1.0"
+tracing = "0.1"
 
 [dev-dependencies]
 igris-proto.workspace = true
-igris-permd.workspace = true
 serde_json.workspace = true
+tempfile = "3.0"

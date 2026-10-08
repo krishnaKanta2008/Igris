@@ -1,0 +1,182 @@
+---
+title: "API Reference Overview"
+description: "Complete reference for all Igris OS tools and methods"
+---
+
+# API Reference Overview
+
+This section documents all available tools in Igris OS, organized by capability family.
+
+## Tool Families
+
+<CardGroup cols={2}>
+  <Card title="System Tools" icon="cpu" href="/api-reference/system-tools">
+    Core system information: `system.info`
+  </Card>
+  <Card title="Filesystem Tools" icon="folder" href="/api-reference/filesystem-tools">
+    File operations: `fs.list`, `fs.stat`, `fs.read`, `fs.write`, `fs.delete`
+  </Card>
+  <Card title="Process Tools" icon="activity" href="/api-reference/process-tools">
+    Process observation: `process.list`, `process.stat`, `process.children`
+  </Card>
+  <Card title="Process Control" icon="zap" href="/api-reference/process-tools#proc-signal">
+    Process signaling: `proc.signal`
+  </Card>
+  <Card title="Event Tools" icon="bell" href="/api-reference/event-tools">
+    Event observation: `events.watch`, `events.poll`, `events.unwatch`
+  </Card>
+  <Card title="Permission System" icon="shield" href="/api-reference/permission-system">
+    Policy model, capabilities, audit logging
+  </Card>
+</CardGroup>
+
+## Common Patterns
+
+### Request Format
+
+All tools use JSON-RPC 2.0 over the Unix socket:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tool.name",
+  "params": { ... }
+}
+```
+
+### Response Format
+
+**Success:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": { ... }
+}
+```
+
+**Error:**
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32603,
+    "message": "Error description",
+    "data": { "reason": "specific_reason" }
+  }
+}
+```
+
+### Capability Requirements
+
+Each tool family requires specific capabilities enabled at daemon startup:
+
+| Family | Capability | Environment Variable |
+|--------|------------|---------------------|
+| System | (none) | — |
+| Filesystem Read | `filesystem_read` | (default) |
+| Filesystem Write | `filesystem_write` | `IGRIS_WRITABLE_PATHS` |
+| Process Observation | (none) | — |
+| Process Control | `process_control` | `IGRIS_PROCESS_CONTROL` |
+| Event Observation | `event_observation` | `IGRIS_EVENTS` |
+
+## Path Conventions
+
+- All paths **must be absolute**
+- Filesystem paths **must be within `IGRIS_FS_ROOT`**
+- Paths are **canonicalized** (symlinks resolved, `..` removed)
+- Symlink targets **must also remain within root**
+
+## Base64 Encoding
+
+File contents are always **base64-encoded** in both requests and responses:
+
+```bash
+# Encode
+echo "Hello" | base64
+# SGVsbG8K
+
+# Decode
+echo "SGVsbG8K" | base64 -d
+# Hello
+```
+
+## Confirmation Flag
+
+Destructive operations require `"confirm": true`:
+
+| Tool | Confirmation Required |
+|------|----------------------|
+| `fs.write` | ✅ Yes |
+| `fs.delete` | ✅ Yes |
+| `proc.signal` | ✅ Yes |
+| All others | ❌ No |
+
+## Error Codes Reference
+
+| Code | Constant | Description |
+|------|----------|-------------|
+| `-32700` | `PARSE_ERROR` | Invalid JSON |
+| `-32600` | `INVALID_REQUEST` | Not a valid JSON-RPC request |
+| `-32601` | `METHOD_NOT_FOUND` | Unknown tool method |
+| `-32602` | `INVALID_PARAMS` | Invalid/missing parameters |
+| `-32603` | `INTERNAL_ERROR` | Internal server error |
+| `-32000` | `PERMISSION_DENIED` | Policy denied request |
+| `-32001` | `CAPABILITY_NOT_ENABLED` | Required capability not active |
+| `-32002` | `PATH_NOT_ALLOWED` | Path outside allowed boundaries |
+| `-32003` | `CONFIRMATION_REQUIRED` | `confirm: true` missing |
+| `-32004` | `RESOURCE_EXHAUSTED` | Limit reached (watches, queue, etc.) |
+| `-32005` | `NOT_FOUND` | Resource not found (watch, process) |
+
+## Quick Reference Table
+
+| Method | Capability | Confirm | Description |
+|--------|------------|---------|-------------|
+| `system.info` | — | No | Kernel/system info |
+| `fs.list` | `filesystem_read` | No | List directory |
+| `fs.stat` | `filesystem_read` | No | File metadata |
+| `fs.read` | `filesystem_read` | No | Read file (base64) |
+| `fs.write` | `filesystem_write` | **Yes** | Write file (base64) |
+| `fs.delete` | `filesystem_write` | **Yes** | Delete file/symlink |
+| `process.list` | — | No | List processes |
+| `process.stat` | — | No | Process metadata |
+| `process.children` | — | No | Child processes |
+| `proc.signal` | `process_control` | **Yes** | Send SIGTERM |
+| `events.watch` | `event_observation` | No | Create watch |
+| `events.poll` | `event_observation` | No | Poll events |
+| `events.unwatch` | `event_observation` | No | Remove watch |
+
+## Using with igrisctl
+
+Most tools have `igrisctl` subcommands:
+
+```bash
+# System
+./target/debug/igrisctl system.info [--json]
+
+# Filesystem
+./target/debug/igrisctl fs.list --path <path> [--max-entries N]
+./target/debug/igrisctl fs.stat --path <path>
+./target/debug/igrisctl fs.read --path <path> [--max-bytes N]
+./target/debug/igrisctl fs.write --path <path> --content <base64> --confirm
+./target/debug/igrisctl fs.delete --path <path> --confirm
+
+# Process
+./target/debug/igrisctl process.list [--max N]
+./target/debug/igrisctl process.stat --pid N
+./target/debug/igrisctl process.children --pid N
+./target/debug/igrisctl proc.signal --pid N --confirm
+
+# Events (not yet in igrisctl)
+# Use raw JSON via socket
+```
+
+## Next Pages
+
+- [System Tools](/api-reference/system-tools) — `system.info`
+- [Filesystem Tools](/api-reference/filesystem-tools) — `fs.*` family
+- [Process Tools](/api-reference/process-tools) — `process.*` and `proc.signal`
+- [Event Tools](/api-reference/event-tools) — `events.*` family
+- [Permission System](/api-reference/permission-system) — Policies, capabilities, audit

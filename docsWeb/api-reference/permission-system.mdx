@@ -1,0 +1,353 @@
+---
+title: "Permission System"
+description: "Reference for Igris OS permission model: capabilities, policies, audit logging"
+---
+
+# Permission System
+
+Complete reference for the Igris OS capability-based permission system.
+
+## Overview
+
+The permission system implements **default-deny** with **explicit capability grants**:
+
+1. **Capabilities** — Coarse-grained feature gates (enabled via environment)
+2. **Policies** — Fine-grained rules evaluated by `igris-permd`
+3. **Audit Log** — Append-only record of every request decision
+
+---
+
+## Capabilities
+
+Capabilities are **enabled at daemon startup** via environment variables.
+
+### Capability Matrix
+
+| Capability | Tools | Env Variable | Default |
+|------------|-------|--------------|---------|
+| `filesystem_read` | `fs.list`, `fs.stat`, `fs.read` | — | ✅ Enabled |
+| `filesystem_write` | `fs.write`, `fs.delete` | `IGRIS_WRITABLE_PATHS` | ❌ Disabled |
+| `process_control` | `proc.signal` | `IGRIS_PROCESS_CONTROL` | ❌ Disabled |
+| `event_observation` | `events.watch`, `events.poll`, `events.unwatch` | `IGRIS_EVENTS` | ❌ Disabled |
+
+### Enabling Capabilities
+
+```bash
+# Enable filesystem write
+IGRIS_WRITABLE_PATHS=/home/user/.igris/share/writable
+
+# Enable process control
+IGRIS_PROCESS_CONTROL=true
+
+# Enable event observation
+IGRIS_EVENTS=true
+
+# Combined
+IGRIS_WRITABLE_PATHS=/home/user/.igris/share/writable \
+IGRIS_PROCESS_CONTROL=true \
+IGRIS_EVENTS=true \
+./target/debug/igrisd
+```
+
+### Capability Validation
+
+- `IGRIS_WRITABLE_PATHS` — Colon-separated paths, must be subdirectories of `IGRIS_FS_ROOT`
+- `IGRIS_PROCESS_CONTROL` — Truthy: any value except `"0"`, `"false"`, `""`
+- `IGRIS_EVENTS` — Truthy: any value except `"0"`, `"false"`, `""`
+
+---
+
+## Policy Engine (`igris-permd`)
+
+The permission broker evaluates policies for **every request**.
+
+### Policy File Format
+
+Policies are TOML files loaded by `igris-permd`:
+
+```toml
+# /etc/igris/policy.toml or $IGRIS_POLICY_PATH
+
+[policy.default]
+# Default policy (applied if no specific policy matches)
+allow = [
+  { capability = "filesystem_read" },
+]
+
+[policy.milestone_six]
+# Named policy (selected via IGRIS_POLICY=milestone_six)
+allow = [
+  { capability = "filesystem_read" },
+  { capability = "filesystem_write", paths = ["/home/user/.igris/share/writable"] },
+  { capability = "process_control", require_confirm = true },
+  { capability = "event_observation" },
+]
+
+[policy.strict]
+allow = [
+  { capability = "filesystem_read", paths = ["/home/user/.igris/share/public"] },
+]
+deny = [
+  { capability = "filesystem_write" },
+  { capability = "process_control" },
+]
+```
+
+### Policy Selection
+
+```bash
+# Use specific policy
+IGRIS_POLICY=milestone_six ./target/debug/igris-permd
+```
+
+### Rule Structure
+
+```toml
+allow = [
+  { capability = "filesystem_write", paths = ["/allowed/path"], require_confirm = true },
+]
+
+deny = [
+  { capability = "process_control" },
+]
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `capability` | string | Yes | Capability name |
+| `paths` | array[string] | No | Allowed paths (for filesystem capabilities) |
+| `require_confirm` | boolean | No | Override confirmation requirement |
+
+### Evaluation Algorithm
+
+```
+For each request:
+  1. Extract capability from tool method
+  2. Check if capability enabled at daemon startup
+     → If not: DENY (CAPABILITY_NOT_ENABLED)
+  3. Find matching policy (IGRIS_POLICY or default)
+  4. Iterate rules in order:
+     a. If rule.capability matches request capability:
+        i. If rule.paths specified: check request path in paths
+        ii. If rule.require_confirm: check request.confirm == true
+        iii. If all conditions met: ALLOW (for allow rule) or DENY (for deny rule)
+  5. No rule matched → DENY (default deny)
+```
+
+### Rule Priority
+
+1. **Explicit deny** rules checked first
+2. **Explicit allow** rules checked second
+3. **First match wins** within each category
+4. **Default: DENY**
+
+---
+
+## Audit Logging
+
+Every request creates **exactly one** audit log entry.
+
+### Log Format (JSON Lines)
+
+```json
+{
+  "timestamp": "2025-01-15T10:30:45.123456Z",
+  "request_id": "req_abc123def456",
+  "operation": "fs.write",
+  "decision": "allow",
+  "result": "ok",
+  "peer": {
+    "pid": 12345,
+    "uid": 1000,
+    "gid": 1000,
+    "cmdline": "igrisctl fs.write --path ..."
+  }
+}
+```
+
+### Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `timestamp` | ISO 8601 | Microsecond precision |
+| `request_id` | string | UUID v4 |
+| `operation` | string | Tool method name |
+| `decision` | enum | `allow` or `deny` |
+| `result` | enum | `ok`, `error`, `not_found`, `permission_denied`, `invalid_params`, `internal_error` |
+| `peer.pid` | integer | Client process ID |
+| `peer.uid` | integer | Client user ID |
+| `peer.gid` | integer | Client group ID |
+| `peer.cmdline` | string | Truncated command line |
+
+### What is NOT Logged
+
+- ❌ Request parameters (paths, content, PIDs, etc.)
+- ❌ Response payloads
+- ❌ File contents
+- ❌ Secrets, tokens, passwords
+- ❌ Environment variables
+
+### Log Location
+
+Default: `$XDG_STATE_HOME/igris/audit.log` or `~/.local/state/igris/audit.log`
+
+Override: `IGRIS_AUDIT_LOG=/custom/path/audit.log`
+
+### Log Rotation Example
+
+```bash
+# /etc/logrotate.d/igris
+/home/user/.local/state/igris/audit.log {
+    daily
+    rotate 30
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 user user
+    sharedscripts
+    postrotate
+        systemctl reload igrisd > /dev/null 2>&1 || true
+    endscript
+}
+```
+
+---
+
+## Error Codes
+
+| Code | Constant | Trigger |
+|------|----------|---------|
+| `-32000` | `PERMISSION_DENIED` | Policy denied request |
+| `-32001` | `CAPABILITY_NOT_ENABLED` | Capability not enabled at startup |
+| `-32002` | `PATH_NOT_ALLOWED` | Path outside allowed boundaries |
+| `-32003` | `CONFIRMATION_REQUIRED` | `confirm: true` missing |
+| `-32004` | `RESOURCE_EXHAUSTED` | Limit reached (watches, queue) |
+| `-32005` | `NOT_FOUND` | Resource not found (watch, process) |
+
+---
+
+## Complete Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            REQUEST FLOW                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Client (igrisctl/Agent)
+        │
+        ▼
+┌───────────────────────┐
+│     igrisd (daemon)   │
+│  ┌─────────────────┐  │
+│  │  Parse Request  │  │
+│  │  Extract:       │  │
+│  │  - method       │  │
+│  │  - params       │  │
+│  │  - peer info    │  │
+│  └────────┬────────┘  │
+└───────────┼───────────┘
+            │
+            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Capability Check (igrisd)                     │
+│  method → capability mapping                                     │
+│  Check: capability enabled at startup?                          │
+│  NO  → DENY (-32001) → Audit Log → Return Error                 │
+│  YES → Continue                                                  │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                 Path/Parameter Validation (igrisd)               │
+│  - Path canonicalization                                        │
+│  - Path confinement (IGRIS_FS_ROOT)                             │
+│  - Write path allow-list (IGRIS_WRITABLE_PATHS)                 │
+│  - Confirmation flag check                                      │
+│  FAIL → DENY (appropriate code) → Audit Log → Return Error      │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                 Policy Evaluation (igris-permd)                  │
+│  Request permission via Unix socket                             │
+│  Policy engine evaluates rules                                  │
+│  ALLOW → Continue                                               │
+│  DENY  → Audit Log → Return Error                               │
+└────────────────────────────┬────────────────────────────────────┘
+                             │
+                    ┌────────┴────────┐
+                    ▼                 ▼
+               ALLOW              DENY
+                    │                 │
+                    ▼                 ▼
+         ┌─────────────────┐  ┌─────────────────┐
+         │ Execute Tool    │  │ Return Error    │
+         │ (read, write,   │  │ (no execution)  │
+         │  signal, etc.)  │  │                 │
+         └────────┬────────┘  └────────┬────────┘
+                  │                    │
+                  └────────┬───────────┘
+                           ▼
+                ┌─────────────────────┐
+                │ Write Audit Log     │
+                │ (always, one entry) │
+                └─────────────────────┘
+```
+
+---
+
+## Configuration Summary
+
+### Daemon (`igrisd`)
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `IGRIS_SOCKET_PATH` | Unix socket path | `$XDG_RUNTIME_DIR/igris/igrisd.sock` |
+| `IGRIS_AUDIT_LOG` | Audit log path | `$XDG_STATE_HOME/igris/audit.log` |
+| `IGRIS_FS_ROOT` | Filesystem root | `~/.igris/share` |
+| `IGRIS_WRITABLE_PATHS` | Write allow-list | (empty) |
+| `IGRIS_PROCESS_CONTROL` | Enable proc.signal | `false` |
+| `IGRIS_EVENTS` | Enable events.* | `false` |
+| `IGRIS_POLICY` | Policy name | `default` |
+
+### Permission Broker (`igris-permd`)
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `IGRIS_PERMD_SOCKET` | Broker socket path | `$XDG_RUNTIME_DIR/igris/igris-permd.sock` |
+| `IGRIS_POLICY_PATH` | Policy file path | `/etc/igris/policy.toml` |
+
+---
+
+## Example: Full Production Config
+
+```bash
+# /etc/igris/environment
+IGRIS_SOCKET_PATH=/run/igris/igrisd.sock
+IGRIS_AUDIT_LOG=/var/log/igris/audit.log
+IGRIS_FS_ROOT=/var/lib/igris/share
+IGRIS_WRITABLE_PATHS=/var/lib/igris/share/writable:/var/lib/igris/share/uploads
+IGRIS_PROCESS_CONTROL=true
+IGRIS_EVENTS=true
+IGRIS_POLICY=production
+
+# /etc/igris/policy.toml
+[policy.production]
+allow = [
+  { capability = "filesystem_read" },
+  { capability = "filesystem_write", paths = ["/var/lib/igris/share/writable", "/var/lib/igris/share/uploads"] },
+  { capability = "process_control", require_confirm = true },
+  { capability = "event_observation" },
+]
+```
+
+---
+
+## Related
+
+- [Security Model](/core-concepts/security-model) — Architecture
+- [Configuration](/guides/configuration) — All environment variables
+- [Writing Policies](/guides/writing-policies) — Policy authoring guide
+- [ADR 0005](/adr/0005-privilege-separation-and-default-deny) — Security model decision
+- [ADR 0007](/adr/0007-filesystem-boundary-and-read-only-tools) — Filesystem confinement

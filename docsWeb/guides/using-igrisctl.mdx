@@ -1,0 +1,496 @@
+---
+title: "Using igrisctl"
+description: "Complete reference for the igrisctl command-line client"
+---
+
+# Using igrisctl
+
+`igrisctl` is the official command-line client for interacting with the Igris OS daemon.
+
+## Installation
+
+Built as part of the Rust workspace:
+
+```bash
+cargo build --workspace
+# Binary at: ./target/debug/igrisctl
+# Release: ./target/release/igrisctl
+```
+
+## Global Options
+
+```bash
+./target/debug/igrisctl [OPTIONS] <COMMAND>
+```
+
+| Option | Short | Description | Default |
+|--------|-------|-------------|---------|
+| `--socket <PATH>` | `-s` | Unix socket path | `$IGRIS_SOCKET_PATH` or default |
+| `--json` | `-j` | Output raw JSON | `false` |
+| `--help` | `-h` | Show help | — |
+| `--version` | `-V` | Show version | — |
+
+## Commands
+
+### system.info
+
+Get system information.
+
+```bash
+./target/debug/igrisctl system.info [--json]
+```
+
+**Output (human):**
+```
+Igris OS System Information
+============================
+
+Kernel:
+  Version:       6.8.0-1006-azure
+  Architecture:  x86_64
+  Hostname:      igris-dev
+  Platform:      Ubuntu 22.04
+
+CPU:
+  Cores:         8
+  Model:         AMD EPYC 7763 64-Core Processor
+  Frequency:     2450 MHz
+
+Memory:
+  Total:         31.2 GB
+  Available:     26.8 GB
+  Used:          4.4 GB
+
+System:
+  Uptime:        14 days, 6 hours
+  Load (1/5/15): 0.52 / 0.48 / 0.45
+
+Igris Daemon:
+  Version:       0.1.0
+  Protocol:      1
+  PID:           12345
+  Uptime:        1 hour
+  Connections:   2
+  Watches:       3
+```
+
+**Output (JSON):**
+```json
+{
+  "kernel": { "version": "...", "architecture": "x86_64", ... },
+  "cpu": { "count": 8, "model": "...", "mhz": 2450 },
+  "memory": { "total_kb": 32768000, "available_kb": 28123456, ... },
+  "uptime_seconds": 1234567,
+  "load_average": { "1m": 0.52, "5m": 0.48, "15m": 0.45 },
+  "igris": { "version": "0.1.0", "protocol_version": 1, ... }
+}
+```
+
+---
+
+### fs.list
+
+List directory entries.
+
+```bash
+./target/debug/igrisctl fs.list --path <PATH> [--max-entries <N>] [--json]
+```
+
+| Option | Required | Default | Description |
+|--------|----------|---------|-------------|
+| `--path` | Yes | — | Absolute path within `IGRIS_FS_ROOT` |
+| `--max-entries` | No | 1000 | Maximum entries to return (max 10000) |
+
+**Example:**
+```bash
+./target/debug/igrisctl fs.list --path ~/.igris/share
+./target/debug/igrisctl fs.list --path ~/.igris/share --max-entries 100 --json
+```
+
+**Output:**
+```
+NAME         TYPE        SIZE
+file.txt     file        1024
+subdir       directory   4096
+link.txt     symlink     12  -> file.txt
+```
+
+---
+
+### fs.stat
+
+Get file metadata.
+
+```bash
+./target/debug/igrisctl fs.stat --path <PATH> [--json]
+```
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--path` | Yes | Absolute path within `IGRIS_FS_ROOT` |
+
+**Example:**
+```bash
+./target/debug/igrisctl fs.stat --path ~/.igris/share/file.txt
+```
+
+**Output:**
+```
+Type:        file
+Size:        1024 bytes
+Mode:        0o644 (rw-r--r--)
+UID:         1000
+GID:         1000
+Modified:    2025-01-15T10:30:45Z
+Accessed:    2025-01-15T10:30:45Z
+Changed:     2025-01-15T10:30:45Z
+```
+
+---
+
+### fs.read
+
+Read file contents (base64 output).
+
+```bash
+./target/debug/igrisctl fs.read --path <PATH> [--max-bytes <N>] [--json]
+```
+
+| Option | Required | Default | Max | Description |
+|--------|----------|---------|-----|-------------|
+| `--path` | Yes | — | — | Absolute path within `IGRIS_FS_ROOT` |
+| `--max-bytes` | No | 65536 | 1048576 | Maximum bytes to read |
+
+**Example:**
+```bash
+./target/debug/igrisctl fs.read --path ~/.igris/share/file.txt
+./target/debug/igrisctl fs.read --path ~/.igris/share/file.txt --max-bytes 1024
+```
+
+**Output:**
+```
+Content (base64): SGVsbG8gV29ybGQK
+Truncated: false
+```
+
+**Decode:**
+```bash
+./target/debug/igrisctl fs.read --path ~/.igris/share/file.txt --json | jq -r '.result.content' | base64 -d
+```
+
+---
+
+### fs.write
+
+Write file (base64 input). **Requires `IGRIS_WRITABLE_PATHS` and `--confirm`.**
+
+```bash
+./target/debug/igrisctl fs.write --path <PATH> --content <BASE64> --confirm [--json]
+```
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--path` | Yes | Absolute path within `IGRIS_WRITABLE_PATHS` |
+| `--content` | Yes | Base64-encoded content |
+| `--confirm` | Yes | Must be present (explicit confirmation) |
+
+**Example:**
+```bash
+# Encode content
+echo "Hello Igris" | base64
+# SGVsbG8gS3JpcyAK
+
+# Write
+./target/debug/igrisctl fs.write \
+  --path ~/.igris/share/writable/greeting.txt \
+  --content "SGVsbG8gS3JpcyAK" \
+  --confirm
+```
+
+**Output:**
+```
+Written: 14 bytes
+```
+
+---
+
+### fs.delete
+
+Delete file or symlink. **Requires `IGRIS_WRITABLE_PATHS` and `--confirm`.**
+
+```bash
+./target/debug/igrisctl fs.delete --path <PATH> --confirm [--json]
+```
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--path` | Yes | Absolute path within `IGRIS_WRITABLE_PATHS` |
+| `--confirm` | Yes | Must be present |
+
+**Example:**
+```bash
+./target/debug/igrisctl fs.delete --path ~/.igris/share/writable/old.txt --confirm
+```
+
+**Output:**
+```
+Deleted: true
+```
+
+---
+
+### process.list
+
+List processes.
+
+```bash
+./target/debug/igrisctl process.list [--max <N>] [--json]
+```
+
+| Option | Required | Default | Max | Description |
+|--------|----------|---------|-----|-------------|
+| `--max` | No | 100 | 1000 | Maximum processes to return |
+
+**Example:**
+```bash
+./target/debug/igrisctl process.list
+./target/debug/igrisctl process.list --max 50 --json
+```
+
+**Output:**
+```
+PID     PPID    NAME          STATE  UID    GID    RSS_KB
+1       0       systemd       S      0      0      15724
+123     1       nginx         S      33     33     8192
+456     1       sshd          S      0      0      4096
+```
+
+---
+
+### process.stat
+
+Get process metadata.
+
+```bash
+./target/debug/igrisctl process.stat --pid <PID> [--json]
+```
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--pid` | Yes | Target process ID |
+
+**Example:**
+```bash
+./target/debug/igrisctl process.stat --pid 123
+```
+
+**Output:**
+```
+PID:        123
+PPID:       1
+Name:       nginx
+State:      S (sleeping)
+UID:        33
+GID:        33
+RSS:        8192 KB
+```
+
+---
+
+### process.children
+
+Get direct children of a process.
+
+```bash
+./target/debug/igrisctl process.children --pid <PID> [--json]
+```
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--pid` | Yes | Parent process ID |
+
+**Example:**
+```bash
+./target/debug/igrisctl process.children --pid 1
+```
+
+**Output:**
+```
+PID     PPID    NAME          STATE  UID    GID    RSS_KB
+123     1       nginx         S      33     33     8192
+456     1       sshd          S      0      0      4096
+```
+
+---
+
+### proc.signal
+
+Send SIGTERM to a process. **Requires `IGRIS_PROCESS_CONTROL=true` and `--confirm`.**
+
+```bash
+./target/debug/igrisctl proc.signal --pid <PID> --confirm [--json]
+```
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--pid` | Yes | Target process ID |
+| `--confirm` | Yes | Must be present |
+
+**Example:**
+```bash
+# Start daemon with process control
+IGRIS_PROCESS_CONTROL=true ./target/debug/igrisd &
+
+# Signal process
+./target/debug/igrisctl proc.signal --pid 9999 --confirm
+```
+
+**Output:**
+```
+Signaled: true
+```
+
+---
+
+## Common Patterns
+
+### Using with jq (JSON Processing)
+
+```bash
+# Get specific field
+./target/debug/igrisctl system.info --json | jq '.result.memory.available_kb'
+
+# Filter processes
+./target/debug/igrisctl process.list --json | jq '.result.processes[] | select(.name == "nginx")'
+
+# Format output
+./target/debug/igrisctl process.list --json | jq -r '.result.processes[] | "\(.pid)\t\(.name)\t\(.state)\t\(.rss_kb)KB"'
+```
+
+### Scripting Examples
+
+#### Backup Script
+
+```bash
+#!/bin/bash
+# backup-config.sh
+
+set -euo pipefail
+
+SOCKET="${IGRIS_SOCKET_PATH:-$XDG_RUNTIME_DIR/igris/igrisd.sock}"
+BACKUP_DIR="$HOME/igris-backups/$(date +%Y%m%d-%H%M%S)"
+
+mkdir -p "$BACKUP_DIR"
+
+# List files to backup
+./target/debug/igrisctl fs.list --path ~/.igris/share --json | \
+  jq -r '.result.entries[] | select(.type == "file") | .name' | \
+  while read -r file; do
+    ./target/debug/igrisctl fs.read --path "~/.igris/share/$file" --json | \
+      jq -r '.result.content' | base64 -d > "$BACKUP_DIR/$file"
+  done
+
+echo "Backup saved to $BACKUP_DIR"
+```
+
+#### Process Monitor
+
+```bash
+#!/bin/bash
+# monitor-process.sh
+
+PID="${1:-1}"
+INTERVAL="${2:-5}"
+
+echo "Monitoring PID $PID every ${INTERVAL}s (Ctrl+C to stop)"
+
+while true; do
+    result=$(./target/debug/igrisctl process.stat --pid "$PID" --json 2>/dev/null)
+    if [ $? -eq 0 ]; then
+        state=$(echo "$result" | jq -r '.result.state')
+        rss=$(echo "$result" | jq -r '.result.rss_kb')
+        name=$(echo "$result" | jq -r '.result.name')
+        echo "[$(date '+%H:%M:%S')] $name (PID $PID) - State: $state, RSS: ${rss}KB"
+    else
+        echo "[$(date '+%H:%M:%S')] Process $PID not found"
+        break
+    fi
+    sleep "$INTERVAL"
+done
+```
+
+### Shell Completion
+
+```bash
+# Generate completion (bash)
+./target/debug/igrisctl --generate-completion bash > /etc/bash_completion.d/igrisctl
+
+# Generate completion (zsh)
+./target/debug/igrisctl --generate-completion zsh > ~/.zsh/completions/_igrisctl
+
+# Generate completion (fish)
+./target/debug/igrisctl --generate-completion fish > ~/.config/fish/completions/igrisctl.fish
+```
+
+## Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `IGRIS_SOCKET_PATH` | Override socket path for client |
+
+```bash
+# Use custom socket
+IGRIS_SOCKET_PATH=/tmp/custom.sock ./target/debug/igrisctl system.info
+```
+
+## Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | General error (connection, permission, etc.) |
+| `2` | Invalid arguments |
+| `3` | JSON parsing error (with `--json`) |
+
+## Troubleshooting
+
+### Connection Failed
+
+```bash
+# Check socket exists
+ls -la $XDG_RUNTIME_DIR/igris/igrisd.sock
+
+# Check daemon running
+pgrep -f igrisd
+
+# Test with explicit socket
+./target/debug/igrisctl --socket /path/to/socket system.info
+```
+
+### Permission Denied
+
+```bash
+# Check capability enabled at daemon start
+ps aux | grep igrisd
+# Look for IGRIS_WRITABLE_PATHS, IGRIS_PROCESS_CONTROL, IGRIS_EVENTS
+```
+
+### JSON Output Issues
+
+```bash
+# Ensure jq installed
+sudo apt install jq  # Ubuntu/Debian
+brew install jq      # macOS
+
+# Pretty print
+./target/debug/igrisctl system.info --json | jq .
+```
+
+---
+
+## Related
+
+- [Quick Start](/quick-start) — First commands
+- [Configuration](/guides/configuration) — Environment variables
+- [API Reference](/api-reference/overview) — Tool specifications
+- [Running Daemon](/guides/running-daemon) — Daemon management

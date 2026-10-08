@@ -1,0 +1,407 @@
+---
+title: "Configuration"
+description: "Complete configuration reference for Igris OS environment variables"
+---
+
+# Configuration Reference
+
+All Igris OS configuration is done via **environment variables**. There are no config files for the daemon itself (policy files are separate).
+
+## Daemon (`igrisd`) Environment Variables
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `IGRIS_SOCKET_PATH` | Unix domain socket path | `$XDG_RUNTIME_DIR/igris/igrisd.sock` or `~/.igris/igrisd.sock` | No |
+| `IGRIS_AUDIT_LOG` | Append-only audit log path | `$XDG_STATE_HOME/igris/audit.log` or `~/.local/state/igris/audit.log` | No |
+| `IGRIS_FS_ROOT` | Canonical filesystem root for `fs.*` tools | `~/.igris/share` | No |
+| `IGRIS_WRITABLE_PATHS` | Colon-separated paths allowed for `fs.write`/`fs.delete` | (empty) | No* |
+| `IGRIS_PROCESS_CONTROL` | Enable `proc.signal` (truthy: not "0" or "false") | `false` | No |
+| `IGRIS_EVENTS` | Enable event observation `events.*` (truthy: not "0" or "false") | `false` | No |
+| `IGRIS_POLICY` | Policy name to load | `default` | No |
+
+*Required only if using `fs.write` or `fs.delete`
+
+## Permission Broker (`igris-permd`) Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `IGRIS_PERMD_SOCKET` | Broker Unix socket path | `$XDG_RUNTIME_DIR/igris/igris-permd.sock` |
+| `IGRIS_POLICY_PATH` | Policy TOML file path | `/etc/igris/policy.toml` |
+
+## Client (`igrisctl`) Environment Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `IGRIS_SOCKET_PATH` | Daemon socket path (must match daemon) | Same as daemon default |
+
+---
+
+## Variable Details
+
+### IGRIS_SOCKET_PATH
+
+**Purpose:** Unix domain socket for client-daemon communication.
+
+**Default Logic:**
+```bash
+if [ -n "$XDG_RUNTIME_DIR" ]; then
+    echo "$XDG_RUNTIME_DIR/igris/igrisd.sock"
+else
+    echo "$HOME/.igris/igrisd.sock"
+fi
+```
+
+**Requirements:**
+- Directory must exist and be `0700`
+- Socket created `0600` (owner read/write only)
+- Must match between daemon and client
+
+**Example:**
+```bash
+export IGRIS_SOCKET_PATH=/run/user/1000/igris/igrisd.sock
+./target/debug/igrisd &
+./target/debug/igrisctl system.info
+```
+
+### IGRIS_AUDIT_LOG
+
+**Purpose:** Append-only JSON Lines audit log.
+
+**Default Logic:**
+```bash
+if [ -n "$XDG_STATE_HOME" ]; then
+    echo "$XDG_STATE_HOME/igris/audit.log"
+else
+    echo "$HOME/.local/state/igris/audit.log"
+fi
+```
+
+**Requirements:**
+- Directory created `0700`
+- File created `0600` (append-only)
+- Parent directories created automatically
+
+**Example:**
+```bash
+export IGRIS_AUDIT_LOG=/var/log/igris/audit.log
+# Ensure directory exists and is writable by daemon user
+sudo mkdir -p /var/log/igris && sudo chown $USER /var/log/igris
+./target/debug/igrisd
+```
+
+### IGRIS_FS_ROOT
+
+**Purpose:** Root directory for all filesystem operations.
+
+**Default:** `~/.igris/share`
+
+**Constraints:**
+- All `fs.*` paths must be within this root (after canonicalization)
+- Must exist and be readable
+- Created automatically if missing (`0700`)
+
+**Example:**
+```bash
+export IGRIS_FS_ROOT=/var/lib/igris/share
+mkdir -p "$IGRIS_FS_ROOT"
+./target/debug/igrisd
+```
+
+### IGRIS_WRITABLE_PATHS
+
+**Purpose:** Colon-separated list of directories where `fs.write` and `fs.delete` are permitted.
+
+**Default:** (empty) — write operations disabled
+
+**Constraints:**
+- Each path must be a **subdirectory of `IGRIS_FS_ROOT`**
+- Paths are canonicalized at daemon startup
+- Maximum 16 paths
+- Enables `filesystem_write` capability when non-empty
+
+**Example:**
+```bash
+# Single path
+export IGRIS_WRITABLE_PATHS=~/.igris/share/writable
+
+# Multiple paths
+export IGRIS_WRITABLE_PATHS=~/.igris/share/writable:~/.igris/share/uploads:~/.igris/share/tmp
+
+mkdir -p ~/.igris/share/writable ~/.igris/share/uploads ~/.igris/share/tmp
+./target/debug/igrisd
+```
+
+### IGRIS_PROCESS_CONTROL
+
+**Purpose:** Enable `proc.signal` tool (send SIGTERM to processes).
+
+**Values:**
+- `true`, `1`, `yes`, `on` → Enabled
+- `false`, `0`, `no`, `off`, `""` → Disabled
+
+**Default:** `false`
+
+**Requires:** Policy grant for `process_control` capability
+
+**Example:**
+```bash
+export IGRIS_PROCESS_CONTROL=true
+./target/debug/igrisd &
+./target/debug/igrisctl proc.signal --pid 123 --confirm
+```
+
+### IGRIS_EVENTS
+
+**Purpose:** Enable event observation tools (`events.watch`, `events.poll`, `events.unwatch`).
+
+**Values:** Same as `IGRIS_PROCESS_CONTROL`
+
+**Default:** `false`
+
+**Requires:** Policy grant for `event_observation` capability
+
+**Example:**
+```bash
+export IGRIS_EVENTS=true
+./target/debug/igrisd &
+# Use raw JSON for events (no igrisctl support yet)
+```
+
+### IGRIS_POLICY
+
+**Purpose:** Select named policy from policy file.
+
+**Default:** `default`
+
+**Example:**
+```bash
+export IGRIS_POLICY=milestone_six
+./target/debug/igrisd
+```
+
+---
+
+## Complete Configuration Examples
+
+### Development (Minimal)
+
+```bash
+# ~/.bashrc or .env file
+export IGRIS_FS_ROOT=~/.igris/share
+./target/debug/igrisd
+```
+
+### Development (Full Features)
+
+```bash
+#!/bin/bash
+# start-dev.sh
+
+export IGRIS_FS_ROOT=~/.igris/share
+export IGRIS_WRITABLE_PATHS=~/.igris/share/writable
+export IGRIS_PROCESS_CONTROL=true
+export IGRIS_EVENTS=true
+export IGRIS_POLICY=milestone_six
+
+mkdir -p "$IGRIS_FS_ROOT" "$IGRIS_WRITABLE_PATHS"
+
+./target/debug/igrisd
+```
+
+### Production (Systemd)
+
+```ini
+# /etc/systemd/system/igrisd.service
+[Unit]
+Description=Igris OS Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=igris
+Group=igris
+Environment=IGRIS_SOCKET_PATH=/run/igris/igrisd.sock
+Environment=IGRIS_AUDIT_LOG=/var/log/igris/audit.log
+Environment=IGRIS_FS_ROOT=/var/lib/igris/share
+Environment=IGRIS_WRITABLE_PATHS=/var/lib/igris/share/writable:/var/lib/igris/share/uploads
+Environment=IGRIS_PROCESS_CONTROL=true
+Environment=IGRIS_EVENTS=true
+Environment=IGRIS_POLICY=production
+ExecStart=/usr/local/bin/igrisd
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/igris /var/log/igris /run/igris
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_KILL
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```toml
+# /etc/igris/policy.toml
+[policy.production]
+allow = [
+  { capability = "filesystem_read" },
+  { capability = "filesystem_write", paths = ["/var/lib/igris/share/writable", "/var/lib/igris/share/uploads"] },
+  { capability = "process_control", require_confirm = true },
+  { capability = "event_observation" },
+]
+```
+
+### Docker
+
+```dockerfile
+# Dockerfile
+FROM rust:1.78 AS builder
+WORKDIR /app
+COPY . .
+RUN cargo build --release --workspace
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/target/release/igrisd /usr/local/bin/
+COPY --from=builder /app/target/release/igrisctl /usr/local/bin/
+COPY --from=builder /app/target/release/igris-permd /usr/local/bin/
+
+RUN useradd -r -s /bin/false igris && \
+    mkdir -p /var/lib/igris/share/writable /var/log/igris /run/igris && \
+    chown -R igris:igris /var/lib/igris /var/log/igris /run/igris
+
+USER igris
+ENV IGRIS_SOCKET_PATH=/run/igris/igrisd.sock \
+    IGRIS_AUDIT_LOG=/var/log/igris/audit.log \
+    IGRIS_FS_ROOT=/var/lib/igris/share \
+    IGRIS_WRITABLE_PATHS=/var/lib/igris/share/writable \
+    IGRIS_PROCESS_CONTROL=true \
+    IGRIS_EVENTS=true \
+    IGRIS_POLICY=production
+
+EXPOSE 8080  # If HTTP API added in future
+CMD ["igrisd"]
+```
+
+---
+
+## XDG Base Directory Support
+
+Igris respects [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/latest/):
+
+| Variable | Fallback |
+|----------|----------|
+| `XDG_RUNTIME_DIR` | Required for socket (usually `/run/user/$(id -u)`) |
+| `XDG_STATE_HOME` | `~/.local/state` |
+| `XDG_CONFIG_HOME` | `~/.config` (for future config files) |
+| `XDG_DATA_HOME` | `~/.local/share` (for future data) |
+
+---
+
+## Validation Checklist
+
+Before starting daemon, verify:
+
+```bash
+#!/bin/bash
+# validate-config.sh
+
+echo "=== Igris Configuration Validation ==="
+
+# Socket directory
+SOCKET_DIR=$(dirname "${IGRIS_SOCKET_PATH:-$XDG_RUNTIME_DIR/igris/igrisd.sock}")
+if [ ! -d "$SOCKET_DIR" ]; then
+    echo "⚠ Socket directory missing: $SOCKET_DIR"
+    echo "   Creating..."
+    mkdir -p "$SOCKET_DIR" && chmod 700 "$SOCKET_DIR"
+fi
+
+# Audit log directory
+AUDIT_DIR=$(dirname "${IGRIS_AUDIT_LOG:-$XDG_STATE_HOME/igris/audit.log}")
+if [ ! -d "$AUDIT_DIR" ]; then
+    echo "⚠ Audit directory missing: $AUDIT_DIR"
+    mkdir -p "$AUDIT_DIR" && chmod 700 "$AUDIT_DIR"
+fi
+
+# FS root
+FS_ROOT="${IGRIS_FS_ROOT:-$HOME/.igris/share}"
+if [ ! -d "$FS_ROOT" ]; then
+    echo "⚠ FS root missing: $FS_ROOT"
+    mkdir -p "$FS_ROOT" && chmod 700 "$FS_ROOT"
+fi
+
+# Writable paths
+if [ -n "$IGRIS_WRITABLE_PATHS" ]; then
+    IFS=':' read -ra PATHS <<< "$IGRIS_WRITABLE_PATHS"
+    for p in "${PATHS[@]}"; do
+        if [[ "$p" != "$FS_ROOT"/* ]]; then
+            echo "❌ ERROR: Writable path not under FS_ROOT: $p"
+            exit 1
+        fi
+        if [ ! -d "$p" ]; then
+            echo "⚠ Writable path missing: $p"
+            mkdir -p "$p"
+        fi
+    done
+fi
+
+echo "✅ Configuration valid"
+```
+
+---
+
+## Troubleshooting
+
+### Socket Permission Denied
+
+```bash
+# Check socket permissions
+ls -la $XDG_RUNTIME_DIR/igris/
+# Should be drwx------ for dir, srw------- for socket
+
+# Fix
+mkdir -p $XDG_RUNTIME_DIR/igris && chmod 700 $XDG_RUNTIME_DIR/igris
+rm -f $XDG_RUNTIME_DIR/igris/igrisd.sock  # Remove stale
+```
+
+### Audit Log Permission Denied
+
+```bash
+# Check audit log permissions
+ls -la $XDG_STATE_HOME/igris/
+# Should be drwx------ for dir, -rw------- for log
+
+# Fix
+mkdir -p $XDG_STATE_HOME/igris && chmod 700 $XDG_STATE_HOME/igris
+```
+
+### Writable Path Not Allowed
+
+```bash
+# Error: PATH_NOT_ALLOWED
+# Check: path must be subdirectory of IGRIS_FS_ROOT
+echo "FS_ROOT: $IGRIS_FS_ROOT"
+echo "WRITABLE: $IGRIS_WRITABLE_PATHS"
+
+# Each writable path must start with FS_ROOT
+```
+
+### Capability Not Enabled
+
+```bash
+# Error: CAPABILITY_NOT_ENABLED
+# Check daemon startup env
+ps aux | grep igrisd
+# Verify IGRIS_WRITABLE_PATHS, IGRIS_PROCESS_CONTROL, IGRIS_EVENTS set
+```
+
+---
+
+## Related
+
+- [Security Model](/core-concepts/security-model) — Capability system
+- [Writing Policies](/guides/writing-policies) — Policy configuration
+- [Quick Start](/quick-start) — Hands-on setup
+- [Running Daemon](/guides/running-daemon) — Daemon management

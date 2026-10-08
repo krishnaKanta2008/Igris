@@ -1,0 +1,133 @@
+---
+title: "Introduction"
+description: "Learn about Igris OS - a Linux-based, AI-native operating system environment"
+---
+
+# Igris OS
+
+Igris OS is a **Linux-based, AI-native operating system environment**. The Linux kernel is the foundation; the project builds a progressively integrated AI system layer on top of it, connected through structured tools and APIs and governed by a least-privilege permission model.
+
+> **Status: Milestone 7 (sandboxed provider isolation) implemented.**
+> The `igrisd` daemon, `igrisctl` client, default-deny permission engine, structured Unix-socket IPC with append-only audit logging, core tool families, and sandboxed provider isolation (namespaces, cgroups, seccomp) are functional.
+
+## Architecture Overview
+
+```
+User
+  ↓
+Igris AI Agent                (Python — agent/)
+  ↓
+Permission / Security Layer   (Rust — core/igris-permd)
+  ↓
+Igris Core Services           (Rust — core/igrisd)
+  ↓
+Linux System Services         (procfs/sysfs, inotify/fanotify, cgroups, seccomp, D-Bus)
+  ↓
+Linux Kernel
+  ↓
+Hardware
+```
+
+## Design Principles
+
+<CardGroup cols={2}>
+  <Card title="No Raw Shell Execution" icon="shield">
+    The AI is never allowed to execute raw, generated shell commands directly.
+  </Card>
+  <Card title="Structured Operations" icon="cube">
+    All system access happens through structured, individually permissioned tools.
+  </Card>
+  <Card title="Default Deny" icon="lock">
+    An operation must be explicitly granted by policy.
+  </Card>
+  <Card title="Explicit Confirmation" icon="alert-triangle">
+    Dangerous operations require explicit user confirmation.
+  </Card>
+  <Card title="Modular Components" icon="puzzle">
+    Components are modular, and every important component is tested.
+  </Card>
+  <Card title="Least Privilege" icon="key">
+    Each tool family is a separate capability with fine-grained permissions.
+  </Card>
+</CardGroup>
+
+## What Works
+
+### Core Services
+- **`igrisd` daemon** and **`igrisctl` client** over a versioned Unix-socket protocol
+- **Default-deny permission broker** (`igris-permd`)
+- **Append-only JSON Lines audit logging**
+- **`system.info`** — live kernel/system data from `/proc` and `/sys`
+
+### Filesystem Tools (confined to `IGRIS_FS_ROOT`)
+| Tool | Description |
+|------|-------------|
+| `fs.list` | List directory entries (bounded, sorted) |
+| `fs.stat` | File metadata (type, size, mode, uid/gid, timestamps) |
+| `fs.read` | Read file contents (base64-encoded, bounded, truncation flag) |
+| `fs.write` | Create or replace regular files (base64 content, confirmation required) |
+| `fs.delete` | Remove regular files or symlinks (confirmation required, no directory deletion) |
+
+### Process Observation and Control
+| Tool | Description |
+|------|-------------|
+| `process.list` | Bounded, PID-sorted snapshot of all processes |
+| `process.stat` | Metadata for a single process (pid, ppid, name, state, uid, gid, rss_kb) |
+| `process.children` | Direct children of a process (not recursive descendants) |
+| `proc.signal` | Deliver SIGTERM to a process (confirmation required, self-signaling rejected) |
+
+### Event Observation (Milestone 6)
+| Tool | Description |
+|------|-------------|
+| `events.watch` | Register a filesystem event watch on an absolute path |
+| `events.poll` | Drain queued events from a watch (non-blocking, bounded) |
+| `events.unwatch` | Remove a watch by `watch_id` (ownership enforced) |
+
+### Provider Sandboxing (Milestone 7)
+| Provider | Binary | Capabilities | Isolation |
+|----------|--------|--------------|-----------|
+| Filesystem | `igris-fs-provider` | `filesystem_read`, `filesystem_write` | Full namespaces, cgroups, seccomp |
+| Process | `igris-process-provider` | `process_control` | `/proc` read-only, `proc.signal` limited to SIGTERM |
+| System | `igris-system-provider` | (always available) | Minimal: `/proc` and `/sys` reads only |
+| Events | `igris-events-provider` | `event_observation` | `inotify` within `IGRIS_FS_ROOT` |
+
+<Note>
+Each provider runs in its own sandboxed process with:
+- **User namespace**: UID/GID mapping, no root inside sandbox
+- **PID namespace**: Isolated process view
+- **Network namespace**: No network access
+- **IPC namespace**: Isolated IPC resources
+- **UTS namespace**: Isolated hostname
+- **Mount namespace**: Bind mount + chroot to `IGRIS_FS_ROOT`
+- **cgroups v2**: Memory, CPU, PID limits
+- **seccomp**: Minimal syscall allowlist (~50 syscalls)
+</Note>
+
+<Note>
+**Not yet implemented:** Process event observation, Streaming IPC/WebSocket-style event delivery, Event filtering/regex matching, `igrisctl` commands for event operations.
+</Note>
+
+## Repository Layout
+
+| Path | Language | Purpose |
+|------|----------|---------|
+| `core/igrisd` | Rust | Core service daemon and privileged IPC/tool-routing boundary |
+| `core/igris-permd` | Rust | Permission/policy broker implementing default-deny |
+| `core/igrisctl` | Rust | Command-line client for the core service daemon |
+| `agent/` | Python | AI agent layer: orchestration, planning, memory, model abstraction |
+| `docs/` | Markdown | Architecture documentation and decision records (ADRs) |
+| `scripts/` | Shell | Development and verification helper scripts |
+
+## Quick Links
+
+- [Getting Started](/getting-started) — Set up your development environment
+- [Architecture](/core-concepts/architecture) — Deep dive into system architecture
+- [API Reference](/api-reference/overview) — Complete API documentation
+- [Configuration](/guides/configuration) — Environment variables and settings
+- [Roadmap](/development/roadmap) — Project roadmap and milestones
+
+## License
+
+This project is licensed under the Apache License, Version 2.0. See [LICENSE](https://github.com/igris-os/igris/blob/main/LICENSE) for the full license text.
+
+Copyright 2024-2025 Igris OS Contributors.

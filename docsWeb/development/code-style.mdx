@@ -1,0 +1,468 @@
+---
+title: "Code Style"
+description: "Coding standards and conventions for Igris OS"
+---
+
+# Code Style Guide
+
+This document defines the coding standards for Igris OS. All code must pass `cargo fmt` and `cargo clippy`.
+
+---
+
+## Rust Style
+
+### Formatting
+
+Enforced by `rustfmt` (via `cargo fmt`):
+
+```bash
+# Check formatting
+cargo fmt --all -- --check
+
+# Auto-format
+cargo fmt --all
+```
+
+### Key Rules
+
+| Rule | Standard |
+|------|----------|
+| Indentation | 4 spaces |
+| Line width | 100 characters |
+| Braces | Same line (K&R) |
+| Imports | Grouped: std, external, local |
+| Trailing commas | Always in multi-line |
+
+### Naming Conventions
+
+| Item | Convention | Example |
+|------|------------|---------|
+| Crates | `kebab-case` | `igris-permd` |
+| Modules | `snake_case` | `ipc_protocol` |
+| Types | `PascalCase` | `Request`, `FileSystemTool` |
+| Functions | `snake_case` | `handle_request` |
+| Constants | `SCREAMING_SNAKE_CASE` | `MAX_WATCHES` |
+| Macros | `snake_case!` | `define_tool!` |
+| Lifetimes | `'short` | `'a`, `'req` |
+
+### Imports Organization
+
+```rust
+// 1. Standard library
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+// 2. External crates (alphabetical)
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use tokio::net::UnixStream;
+
+// 3. Local crate (self)
+use crate::tools::ToolHandler;
+use crate::ipc::Frame;
+
+// 4. Sibling modules
+use super::Config;
+use super::error::Error;
+```
+
+### Error Handling
+
+```rust
+// Use anyhow for application errors
+use anyhow::{Context, Result};
+
+// Define domain errors with thiserror
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ToolError {
+    #[error("path not found: {path}")]
+    NotFound { path: String },
+    
+    #[error("permission denied: {reason}")]
+    PermissionDenied { reason: String },
+    
+    #[error("invalid parameter: {0}")]
+    InvalidParam(String),
+}
+
+// Convert to JSON-RPC errors
+impl From<ToolError> for JsonRpcError {
+    fn from(err: ToolError) -> Self {
+        match err {
+            ToolError::NotFound { .. } => JsonRpcError::not_found(err.to_string()),
+            ToolError::PermissionDenied { .. } => JsonRpcError::permission_denied(err.to_string()),
+            ToolError::InvalidParam(_) => JsonRpcError::invalid_params(err.to_string()),
+        }
+    }
+}
+```
+
+### Async Code
+
+```rust
+// Prefer async/await
+pub async fn handle_request(req: Request) -> Result<Response> {
+    let result = process_request(req).await?;
+    Ok(Response::success(result))
+}
+
+// Use tokio::select! for concurrent operations
+tokio::select! {
+    result = handle_client(client) => { /* ... */ }
+    _ = shutdown_signal() => { /* ... */ }
+}
+
+// Avoid blocking in async context
+// BAD:
+std::thread::sleep(Duration::from_secs(1));
+
+// GOOD:
+tokio::time::sleep(Duration::from_secs(1)).await;
+
+// Use spawn_blocking for CPU-intensive work
+let result = tokio::task::spawn_blocking(|| heavy_computation()).await?;
+```
+
+### Concurrency
+
+```rust
+// Use Arc<Mutex<_>> for shared mutable state
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+let state = Arc::new(Mutex::new(SharedState::new()));
+
+// Prefer RwLock for read-heavy workloads
+use tokio::sync::RwLock;
+let cache = Arc::new(RwLock::new(HashMap::new()));
+
+// Channels for message passing
+use tokio::sync::mpsc;
+let (tx, mut rx) = mpsc::channel(100);
+```
+
+### Documentation
+
+```rust
+/// Processes a filesystem read request.
+///
+/// # Arguments
+/// * `path` - Absolute path within `IGRIS_FS_ROOT`
+/// * `max_bytes` - Maximum bytes to read (default: 64KB, max: 1MB)
+///
+/// # Returns
+/// Base64-encoded file contents and truncation flag.
+///
+/// # Errors
+/// Returns `ToolError::NotFound` if path doesn't exist.
+/// Returns `ToolError::PermissionDenied` if path outside root.
+pub async fn fs_read(path: &str, max_bytes: usize) -> Result<FsReadResult> {
+    // ...
+}
+
+/// Configuration for the event subsystem.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventConfig {
+    /// Maximum watches per connection (default: 16)
+    pub max_watches_per_connection: usize,
+    
+    /// Maximum queued events globally (default: 256)
+    pub max_queued_events: usize,
+}
+```
+
+### Testing Patterns
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+    use tokio::test;
+
+    #[test]
+    async fn test_fs_read_success() {
+        // Arrange
+        let temp = TempDir::new().unwrap();
+        let file = temp.path().join("test.txt");
+        std::fs::write(&file, b"hello world").unwrap();
+
+        // Act
+        let result = fs_read(file.to_str().unwrap(), 1024).await;
+
+        // Assert
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert_eq!(data.content, "aGVsbG8gd29ybGQ="); // base64
+        assert!(!data.truncated);
+    }
+
+    #[test]
+    async fn test_fs_read_not_found() {
+        let result = fs_read("/nonexistent/path", 1024).await;
+        assert!(matches!(result, Err(ToolError::NotFound { .. })));
+    }
+}
+```
+
+### Clippy Lints
+
+Enforced lints (in `clippy.toml` or `Cargo.toml`):
+
+```toml
+# Cargo.toml
+[workspace.lints.clippy]
+# Pedantic lints
+redundant_closure_for_method_calls = "warn"
+match_same_arms = "warn"
+similar_names = "warn"
+```
+
+```bash
+# Run with all lints
+cargo clippy --workspace -- -D warnings -W clippy::pedantic -W clippy::nursery
+```
+
+---
+
+## Python Style (Agent Layer)
+
+### Formatting
+
+```bash
+# Black for formatting
+pip install black
+black agent/src agent/tests
+
+# isort for imports
+pip install isort
+isort agent/src agent/tests
+```
+
+### Configuration
+
+```toml
+# pyproject.toml
+[tool.black]
+line-length = 100
+target-version = ['py310']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 100
+multi_line_output = 3
+```
+
+### Type Hints
+
+```python
+# Always use type hints
+from typing import List, Optional, Dict, Any
+from dataclasses import dataclass
+
+@dataclass
+class ToolCall:
+    name: str
+    params: Dict[str, Any]
+    request_id: int
+
+async def execute_tool(call: ToolCall) -> ToolResult:
+    """Execute a tool call and return result."""
+    handler = TOOL_REGISTRY.get(call.name)
+    if not handler:
+        raise ValueError(f"Unknown tool: {call.name}")
+    return await handler(call.params)
+```
+
+### Async Patterns
+
+```python
+import asyncio
+from typing import AsyncIterator
+
+async def process_stream(stream: AsyncIterator[Event]) -> List[Result]:
+    """Process events concurrently with bounded parallelism."""
+    semaphore = asyncio.Semaphore(10)
+    
+    async def process_one(event: Event) -> Result:
+        async with semaphore:
+            return await handle_event(event)
+    
+    tasks = [process_one(event) async for event in stream]
+    return await asyncio.gather(*tasks)
+```
+
+### Error Handling
+
+```python
+# Custom exceptions
+class ToolError(Exception):
+    def __init__(self, code: int, message: str, data: Optional[Dict] = None):
+        self.code = code
+        self.message = message
+        self.data = data
+        super().__init__(message)
+
+# Use in handlers
+async def fs_read(params: Dict) -> Dict:
+    path = params.get("path")
+    if not path:
+        raise ToolError(-32602, "Missing required parameter: path")
+    
+    try:
+        content = await read_file(path)
+    except FileNotFoundError:
+        raise ToolError(-32005, "File not found", {"path": path})
+    
+    return {"content": content}
+```
+
+---
+
+## Documentation Style
+
+### Markdown
+
+- Use ATX headers (`#`, `##`, `###`)
+- Code blocks with language tags
+- Relative links for internal references
+- Tables for structured data
+
+### Mintlify Components
+
+```mdx
+<Card title="Title" icon="icon-name" href="/link">
+  Description
+</Card>
+
+<CardGroup cols={2}>
+  <Card>...</Card>
+  <Card>...</Card>
+</CardGroup>
+
+<Note>
+  Important note
+</Note>
+
+<Tabs>
+  <TabItem value="rust" label="Rust" default>
+    ```rust
+    // code
+    ```
+  </TabItem>
+  <TabItem value="python" label="Python">
+    ```python
+    # code
+    ```
+  </TabItem>
+</Tabs>
+```
+
+### API Documentation
+
+- Every public item must have doc comments
+- Include `# Arguments`, `# Returns`, `# Errors` sections
+- Provide examples for complex functions
+
+---
+
+## Git Practices
+
+### Branch Naming
+
+| Type | Pattern | Example |
+|------|---------|---------|
+| Feature | `feature/<short-description>` | `feature/add-fs-copy` |
+| Bug fix | `fix/<issue-description>` | `fix/permd-symlink-handling` |
+| Docs | `docs/<topic>` | `docs/update-api-reference` |
+| Refactor | `refactor/<component>` | `refactor/ipc-framing` |
+| Chore | `chore/<task>` | `chore/update-dependencies` |
+
+### Commit Guidelines
+
+- One logical change per commit
+- Commit message follows [Conventional Commits](/development/contributing#commit-message-convention)
+- Reference issues: `Fixes #123`, `Refs #456`
+- Sign commits: `git commit -s`
+
+---
+
+## Review Checklist
+
+### Code Review Items
+
+- [ ] **Formatting**: `cargo fmt --all -- --check` passes
+- [ ] **Clippy**: `cargo clippy --workspace -- -D warnings` passes
+- [ ] **Tests**: All tests pass, new code tested
+- [ ] **Types**: No `unwrap()`/`expect()` in production paths
+- [ ] **Errors**: Proper error types, no `Box<dyn Error>` in public APIs
+- [ ] **Async**: No blocking calls in async functions
+- [ ] **Safety**: No `unsafe` without justification and comment
+- [ ] **Performance**: No unnecessary clones, allocations
+- [ ] **Documentation**: Public APIs documented
+- [ ] **Security**: No hardcoded secrets, proper validation
+
+---
+
+## Tooling
+
+### Pre-commit Hooks
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/doublify/pre-commit-rust
+    rev: v1.0
+    hooks:
+      - id: fmt
+      - id: clippy
+        args: ["--", "-D", "warnings"]
+      - id: cargo-check
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+```
+
+### Editor Integration
+
+Configure your editor to run on save:
+- Format: `cargo fmt` / `black` / `isort`
+- Lint: `cargo clippy` / `ruff` / `mypy`
+- Test: Run related tests
+
+---
+
+## Exceptions
+
+When to deviate from standards:
+
+1. **Generated code** — Don't modify, regenerate instead
+2. **Fuzz targets** — May use `unwrap()` for simplicity
+3. **Benchmarks** — May use unsafe for accurate measurement
+4. **Platform-specific** — May need `unsafe` for FFI
+
+Document exceptions with comments:
+
+```rust
+// SAFETY: This is safe because we verified the pointer is valid
+// and the memory is initialized in the caller.
+// Exception to "no unsafe in production" rule for FFI boundary.
+unsafe fn external_call(ptr: *const c_void) { ... }
+```
+
+---
+
+## Related
+
+- [Development Setup](/development/setup) — Editor configuration
+- [Contributing](/development/contributing) — Contribution process
+- [Testing](/development/testing) — Testing standards
+- [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/) — External reference

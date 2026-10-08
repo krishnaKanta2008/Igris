@@ -1,0 +1,211 @@
+---
+title: "Roadmap"
+description: "Igris OS development roadmap and milestones"
+---
+
+# Development Roadmap
+
+Igris OS follows an incremental, test-driven roadmap with clearly defined milestones.
+
+## Current Status
+
+> **Status: Milestone 7 Complete** — Sandboxed provider isolation implemented.
+> Real provider sandboxing with namespaces, cgroups, and seccomp is functional.
+
+---
+
+## Phase Overview
+
+| Phase | Focus | Status |
+|-------|-------|--------|
+| **Phase 0** | Project Foundation | ✅ Complete |
+| **Phase 1** | Trusted Core IPC (Milestone 1) | ✅ Complete |
+| **Phase 2** | Filesystem Tools (Milestones 2–4) | ✅ Complete |
+| **Phase 3** | Process Observation & Control (Milestones 3, 5) | ✅ Complete |
+| **Phase 3 cont.** | Event Observation (Milestone 6) | ✅ Complete |
+| **Phase 3 cont.** | Provider Sandboxing (Milestone 7) | ✅ Complete |
+| **Phase 4** | AI Agent Layer | 🚧 Scaffold Only |
+| **Phase 5** | OS-Level Integration | 📋 Planned |
+| **Phase 6** | Installable Igris OS Environment | 📋 Planned |
+
+---
+
+## Completed Milestones
+
+### Milestone 1: Trusted Core IPC
+- ✅ Unix domain socket server (`igrisd`)
+- ✅ JSON-RPC 2.0 protocol with length-prefixed framing
+- ✅ Versioned handshake
+- ✅ Append-only JSON Lines audit logging
+- ✅ Basic client (`igrisctl`)
+- ✅ Permission broker (`igris-permd`) with default-deny
+
+### Milestone 2: Filesystem Read Tools
+- ✅ `fs.list` — Bounded directory listing
+- ✅ `fs.stat` — File metadata
+- ✅ `fs.read` — Base64-encoded file reads with truncation
+- ✅ Path canonicalization and confinement to `IGRIS_FS_ROOT`
+- ✅ Symlink containment verification
+
+### Milestone 3: Filesystem Write Tools
+- ✅ `fs.write` — Base64 content, confirmation required
+- ✅ `fs.delete` — File/symlink removal, confirmation required
+- ✅ `IGRIS_WRITABLE_PATHS` allow-list
+- ✅ Atomic write (temp + rename)
+- ✅ Parent directory creation
+
+### Milestone 4: Process Observation
+- ✅ `process.list` — PID-sorted snapshot
+- ✅ `process.stat` — Single process metadata
+- ✅ `process.children` — Direct children only
+- ✅ Data sourced from `/proc` only
+- ✅ No sensitive data exposure (cmdline, environ, etc.)
+
+### Milestone 5: Process Control
+- ✅ `proc.signal` — SIGTERM delivery
+- ✅ Confirmation required
+- ✅ Self-signaling protection
+- ✅ OS permission enforcement
+- ✅ `IGRIS_PROCESS_CONTROL` capability gate
+
+### Milestone 6: Event Observation Infrastructure
+- ✅ `events.watch` — Register filesystem watch
+- ✅ `events.poll` — Non-blocking event drain
+- ✅ `events.unwatch` — Remove watch
+- ✅ Connection-owned watches with automatic cleanup
+- ✅ Bounded queues (16/watch, 256 total)
+- ✅ `inotify` backend for real events
+- ✅ `IGRIS_EVENTS` capability gate
+
+### Milestone 7: Provider Sandboxing & Isolation
+- ✅ Provider architecture: `igrisd` routes to sandboxed provider processes
+- ✅ Four sandboxed providers: `fs`, `process`, `system`, `events`
+- ✅ User namespace: UID/GID mapping, no root inside sandbox
+- ✅ PID namespace: Isolated process view
+- ✅ Network namespace: No network access
+- ✅ IPC namespace: Isolated IPC resources
+- ✅ UTS namespace: Isolated hostname/domainname
+- ✅ Mount namespace: Bind mount + chroot to `IGRIS_FS_ROOT`
+- ✅ cgroups v2: Memory limit, CPU quota, PID limit
+- ✅ seccomp: Minimal syscall allowlist (~50 syscalls)
+- ✅ Provider lifecycle management (spawn, monitor, shutdown)
+- ✅ cgroups v2 resource limits enforced by kernel
+- ✅ seccomp BPF filter with default-deny
+- ✅ Provider lifecycle managed by `igrisd` (spawn, monitor, shutdown)
+- ✅ Fail-closed: sandbox setup failure aborts provider startup
+
+---
+
+## In Progress / Near Term
+
+### Phase 3 Continued: Event System Enhancements
+
+| Task | Status | Details |
+|------|--------|---------|
+| Process event observation | 📋 Planned | `proc.exec`, `proc.exit`, `proc.fork` via proc connector |
+| Streaming IPC | 📋 Planned | WebSocket-style push notifications |
+| Event filtering | 📋 Planned | Regex, mask filter, field projection |
+| Recursive watches | 📋 Planned | Subtree monitoring |
+| `igrisctl` event commands | 📋 Planned | CLI for watch/poll/unwatch |
+
+### Phase 4: AI Agent Layer
+
+| Task | Status | Details |
+|------|--------|---------|
+| Orchestration engine | 🚧 Scaffold | Planning, tool selection |
+| Memory system | 🚧 Scaffold | Conversation history, context |
+| Model abstraction | 🚧 Scaffold | Multi-provider support (OpenAI, Anthropic, local) |
+| Policy-aware planning | 📋 Planned | Plans respect capability grants |
+| Human-in-the-loop | 📋 Planned | Confirmation callbacks for destructive actions |
+
+---
+
+## Medium Term: Phase 5 — OS-Level Integration
+
+### Systemd Integration
+- [ ] Systemd service units for `igrisd` and `igris-permd`
+- [ ] Socket activation support
+- [ ] Log integration with journald
+- [ ] Watchdog/health checks
+
+### D-Bus Integration
+- [ ] D-Bus service for system integration
+- [ ] Standard interfaces (org.freedesktop.*)
+- [ ] Activation via D-Bus
+
+### Security Hardening
+- [ ] Seccomp filters for `igrisd` and `igris-permd`
+- [ ] Capability bounding (CAP_DAC_OVERRIDE, CAP_KILL only)
+- [ ] Landlock LSM for filesystem confinement (kernel 5.13+)
+- [ ] SELinux/AppArmor profiles
+
+### Packaging
+- [ ] Debian/Ubuntu packages (.deb)
+- [ ] Fedora/RHEL packages (.rpm)
+- [ ] Arch Linux package (AUR)
+- [ ] Homebrew formula (macOS CLI tools only)
+- [ ] Docker images (multi-arch)
+
+---
+
+## Long Term: Phase 6 — Installable Igris OS
+
+### Distribution Formats
+- [ ] Bootable ISO image
+- [ ] VM images (QCOW2, VMDK, VHDX)
+- [ ] Raspberry Pi / ARM SBC images
+- [ ] Cloud images (AWS AMI, GCP, Azure)
+
+### Installer
+- [ ] Graphical installer (Calamares-based)
+- [ ] Headless/automated installer
+- [ ] Partitioning and encryption support
+- [ ] Post-install configuration
+
+### Base System
+- [ ] Minimal Linux kernel config
+- [ ] Initramfs with Igris components
+- [ ] Immutable root filesystem (optional)
+- [ ] A/B partition updates
+
+### Hardware Support
+- [ ] x86_64 (primary)
+- [ ] aarch64 (Raspberry Pi, ARM servers)
+- [ ] RISC-V (future)
+- [ ] GPU acceleration for AI workloads
+
+---
+
+## Release Timeline (Estimated)
+
+| Version | Target | Focus |
+|---------|--------|-------|
+| 0.1.x | Current | Milestone 6 completion, stabilization |
+| 0.2.0 | Q1 2025 | Event system enhancements, process events |
+| 0.3.0 | Q2 2025 | Streaming IPC, agent layer improvements |
+| 0.4.0 | Q3 2025 | Systemd/D-Bus integration, packaging |
+| 0.5.0 | Q4 2025 | Seccomp, Landlock, security hardening |
+| 1.0.0 | 2026 | Installable Igris OS, stable APIs |
+
+---
+
+## Contributing to Roadmap
+
+Roadmap items are tracked in:
+- [GitHub Issues](https://github.com/igris-os/igris/issues) — Specific tasks
+- [GitHub Projects](https://github.com/orgs/igris-os/projects) — Milestone boards
+- [ADRs](/adr/overview) — Architectural decisions
+
+To propose changes:
+1. Open a GitHub Discussion for major direction changes
+2. File an issue for specific features
+3. Reference relevant ADRs
+
+---
+
+## Related
+
+- [Architecture](/core-concepts/architecture) — System design
+- [ADR Overview](/adr/overview) — Decision records
+- [Contributing](/development/contributing) — How to contribute
+- [GitHub Roadmap](https://github.com/orgs/igris-os/projects) — Live tracking

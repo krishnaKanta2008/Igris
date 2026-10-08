@@ -1,0 +1,285 @@
+---
+title: "Contributing"
+description: "Guidelines for contributing to Igris OS"
+---
+
+# Contributing to Igris OS
+
+Thank you for your interest in contributing! This guide covers the contribution process, coding standards, and best practices.
+
+## Ways to Contribute
+
+- 🐛 **Bug Reports** — File issues with reproduction steps
+- 💡 **Feature Requests** — Propose new capabilities
+- 📝 **Documentation** — Improve guides, fix typos, add examples
+- 🔧 **Code** — Fix bugs, implement features, improve tests
+- 🏗️ **Infrastructure** — CI/CD, build system, tooling
+- 🧪 **Testing** — Add tests, improve coverage, find edge cases
+
+---
+
+## Getting Started
+
+### 1. Fork and Clone
+
+```bash
+# Fork on GitHub, then clone your fork
+git clone https://github.com/YOUR-USERNAME/igris.git
+cd igris
+
+# Add upstream remote
+git remote add upstream https://github.com/igris-os/igris.git
+```
+
+### 2. Set Up Development Environment
+
+Follow [Development Setup](/development/setup) guide.
+
+### 3. Create a Branch
+
+```bash
+# Sync with upstream
+git fetch upstream
+git checkout main
+git rebase upstream/main
+
+# Create feature branch
+git checkout -b feature/your-feature-name
+# or
+git checkout -b fix/issue-description
+```
+
+---
+
+## Contribution Process
+
+### For Small Changes (Typos, Docs, Small Fixes)
+
+1. Make changes
+2. Run tests: `cargo test --workspace && python3 -m unittest discover -s agent/tests`
+3. Commit with clear message
+4. Push and open PR
+
+### For Features and Significant Changes
+
+1. **Open an Issue First** — Discuss design before implementing
+2. **Check ADRs** — Review [Architecture Decision Records](/adr/overview) for context
+3. **Design Document** — For major features, write a brief design doc
+4. **Implement** — Write code with tests
+5. **Update Documentation** — Keep docs in sync
+6. **Open PR** — Reference the issue
+
+---
+
+## Commit Message Convention
+
+Follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>(<scope>): <description>
+
+[optional body]
+
+[optional footer]
+```
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| `feat` | New feature |
+| `fix` | Bug fix |
+| `docs` | Documentation only |
+| `style` | Formatting, no code change |
+| `refactor` | Code restructuring |
+| `perf` | Performance improvement |
+| `test` | Adding tests |
+| `chore` | Maintenance, build, deps |
+| `ci` | CI/CD changes |
+
+### Examples
+
+```
+feat(fs): add fs.copy tool for file duplication
+
+fix(permd): correct path canonicalization for symlinks
+
+docs(api): update fs.write examples with base64 encoding
+
+refactor(ipc): extract frame parsing to separate module
+
+test(process): add property-based tests for process.list
+
+chore(deps): update tokio to 1.38
+```
+
+### Scope Guidelines
+
+- `core` — Cross-cutting changes
+- `igrisd` — Daemon changes
+- `igrisctl` — CLI changes
+- `permd` — Permission broker changes
+- `ipc` — Protocol changes
+- `fs` — Filesystem tools
+- `process` — Process tools
+- `events` — Event tools
+- `agent` — Python agent
+- `docs` — Documentation
+- `ci` — CI/CD
+- `deps` — Dependencies
+
+---
+
+## Pull Request Checklist
+
+Before submitting:
+
+- [ ] **Tests pass**: `cargo test --workspace && python3 -m unittest discover -s agent/tests`
+- [ ] **Format check**: `cargo fmt --all -- --check`
+- [ ] **Clippy clean**: `cargo clippy --workspace -- -D warnings`
+- [ ] **No warnings**: Build produces zero warnings
+- [ ] **Documentation updated**: Relevant docs reflect changes
+- [ ] **Changelog entry**: Added to `CHANGELOG.md` (if applicable)
+- [ ] **Commit messages**: Follow conventional commits
+- [ ] **Branch up to date**: Rebased on latest `main`
+- [ ] **PR description**: Clear description, links to issue
+
+### PR Template
+
+```markdown
+## Description
+Brief description of changes
+
+## Related Issue
+Fixes #123
+
+## Type of Change
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Breaking change
+- [ ] Documentation update
+
+## Testing
+- [ ] Unit tests added/updated
+- [ ] Integration tests added/updated
+- [ ] Manual testing performed
+
+## Checklist
+- [ ] Code follows style guidelines
+- [ ] Self-review completed
+- [ ] Documentation updated
+- [ ] No new warnings
+```
+
+---
+
+## Code Review Process
+
+### What Reviewers Look For
+
+1. **Correctness** — Does it solve the problem?
+2. **Safety** — No security regressions, proper error handling
+3. **Performance** — No unnecessary allocations, efficient algorithms
+4. **Maintainability** — Clear code, good abstractions, documented
+5. **Tests** — Adequate coverage, meaningful assertions
+6. **Documentation** — Public APIs documented, examples updated
+7. **Consistency** — Follows existing patterns and conventions
+
+### Review Timeline
+
+- **Small PRs** (< 100 lines): 1-2 days
+- **Medium PRs** (100-500 lines): 3-5 days
+- **Large PRs** (> 500 lines): 1-2 weeks (may need multiple reviews)
+
+---
+
+## Security Considerations
+
+### Reporting Vulnerabilities
+
+**Do not file public issues for security vulnerabilities.**
+
+Email: security@igris-os.org
+
+Include:
+- Description of vulnerability
+- Steps to reproduce
+- Impact assessment
+- Suggested fix (if any)
+
+### Security Review Required For
+
+- Changes to permission system
+- IPC protocol modifications
+- Filesystem boundary changes
+- Process control modifications
+- New capabilities/tools
+- Cryptographic operations
+
+---
+
+## Release Process
+
+### Versioning
+
+Follows [Semantic Versioning](https://semver.org/):
+
+- **Major** — Breaking changes (protocol, API removal)
+- **Minor** — New features (backward compatible)
+- **Patch** — Bug fixes (backward compatible)
+
+### Release Checklist (Maintainers)
+
+- [ ] All CI passes
+- [ ] Changelog updated
+- [ ] Version bumped in `Cargo.toml` files
+- [ ] Git tag created: `git tag v0.x.y`
+- [ ] GitHub Release published
+- [ ] Docker images built and pushed
+- [ ] Documentation deployed
+
+---
+
+## Community
+
+### Communication Channels
+
+- **GitHub Discussions** — Questions, ideas, general discussion
+- **GitHub Issues** — Bug reports, feature requests
+- **Discord** — Real-time chat, #igris-os
+- **Email** — security@igris-os.org (security only)
+
+### Code of Conduct
+
+We follow the [Contributor Covenant](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). By participating, you agree to uphold this code.
+
+### Getting Help
+
+- Check existing issues and discussions
+- Search documentation
+- Ask in Discord #development channel
+- Open a GitHub Discussion for design questions
+
+---
+
+## Recognition
+
+Contributors are recognized in:
+- `CONTRIBUTORS.md` file
+- Release notes
+- Annual contributor highlights
+
+---
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the Apache License 2.0 (same as the project).
+
+---
+
+## Related
+
+- [Development Setup](/development/setup) — Environment setup
+- [Code Style](/development/code-style) — Coding standards
+- [Testing](/development/testing) — Testing guide
+- [ADR Overview](/adr/overview) — Architecture decisions

@@ -1,0 +1,405 @@
+---
+title: "Running the Daemon"
+description: "Guide to starting, stopping, and managing the Igris OS daemon"
+---
+
+# Running the Daemon
+
+The `igrisd` daemon is the core service that handles IPC, tool routing, and permission enforcement.
+
+## Basic Usage
+
+### Foreground (Development)
+
+```bash
+# Terminal 1: Start daemon
+./target/debug/igrisd
+
+# Output:
+# [INFO] Starting igrisd v0.1.0
+# [INFO] Listening on /run/user/1000/igris/igrisd.sock
+# [INFO] Audit log: /home/user/.local/state/igris/audit.log
+# [INFO] FS root: /home/user/.igris/share
+# [INFO] Capabilities: filesystem_read
+```
+
+### Background (Production)
+
+```bash
+# Using nohup
+nohup ./target/debug/igrisd > igrisd.log 2>&1 &
+
+# Using systemd (recommended for production)
+sudo systemctl start igrisd
+```
+
+### With Full Capabilities
+
+```bash
+mkdir -p ~/.igris/share/writable
+
+IGRIS_WRITABLE_PATHS=~/.igris/share/writable \
+IGRIS_PROCESS_CONTROL=true \
+IGRIS_EVENTS=true \
+IGRIS_POLICY=milestone_six \
+./target/debug/igrisd
+```
+
+## Daemon Lifecycle
+
+### Startup Sequence
+
+```
+1. Parse environment variables
+2. Validate paths and permissions
+3. Create socket directory (0700)
+4. Create audit log directory (0700)
+5. Connect to igris-permd (permission broker)
+6. Bind to Unix socket
+7. Initialize tool handlers
+8. Initialize event provider (if IGRIS_EVENTS)
+9. Enter event loop
+10. Log startup complete
+```
+
+### Shutdown Sequence
+
+```
+1. Receive SIGTERM/SIGINT
+2. Stop accepting new connections
+3. Close listening socket
+4. Wait for active requests to complete (max 30s)
+5. Flush audit log
+6. Close permission broker connection
+7. Clean up event watches
+8. Remove socket file
+9. Exit
+```
+
+## Signal Handling
+
+| Signal | Action |
+|--------|--------|
+| `SIGTERM` | Graceful shutdown (default) |
+| `SIGINT` | Graceful shutdown (Ctrl+C) |
+| `SIGHUP` | Reload policy (future) |
+| `SIGUSR1` | Dump stats to log (future) |
+
+```bash
+# Graceful stop
+kill $(pidof igrisd)
+# or
+pkill igrisd
+
+# Force kill (if stuck)
+kill -9 $(pidof igrisd)
+```
+
+## Process Management
+
+### systemd Service
+
+```ini
+# /etc/systemd/system/igrisd.service
+[Unit]
+Description=Igris OS Core Daemon
+Documentation=https://docs.igris-os.org
+After=network.target igris-permd.service
+Requires=igris-permd.service
+
+[Service]
+Type=notify
+User=igris
+Group=igris
+EnvironmentFile=/etc/igris/environment
+ExecStart=/usr/local/bin/igrisd
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+# Security
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/igris /var/log/igris /run/igris
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_KILL
+AmbientCapabilities=CAP_DAC_OVERRIDE CAP_KILL
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=igrisd
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+# /etc/igris/environment
+IGRIS_SOCKET_PATH=/run/igris/igrisd.sock
+IGRIS_AUDIT_LOG=/var/log/igris/audit.log
+IGRIS_FS_ROOT=/var/lib/igris/share
+IGRIS_WRITABLE_PATHS=/var/lib/igris/share/writable:/var/lib/igris/share/uploads
+IGRIS_PROCESS_CONTROL=true
+IGRIS_EVENTS=true
+IGRIS_POLICY=production
+```
+
+```bash
+# Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable igrisd
+sudo systemctl start igrisd
+
+# Check status
+sudo systemctl status igrisd
+
+# View logs
+sudo journalctl -u igrisd -f
+```
+
+### Permission Broker Service
+
+```ini
+# /etc/systemd/system/igris-permd.service
+[Unit]
+Description=Igris OS Permission Broker
+After=network.target
+
+[Service]
+Type=simple
+User=igris
+Group=igris
+EnvironmentFile=/etc/igris/permd-environment
+ExecStart=/usr/local/bin/igris-permd
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+# /etc/igris/permd-environment
+IGRIS_PERMD_SOCKET=/run/igris/igris-permd.sock
+IGRIS_POLICY_PATH=/etc/igris/policy.toml
+```
+
+## Monitoring
+
+### Health Checks
+
+```bash
+# Basic connectivity
+./target/debug/igrisctl system.info
+
+# JSON for monitoring systems
+./target/debug/igrisctl system.info --json | jq '.result.igris'
+
+# Expected response:
+# {
+#   "version": "0.1.0",
+#   "protocol_version": 1,
+#   "daemon_pid": 12345,
+#   "daemon_uptime_seconds": 3600,
+#   "connections_active": 2,
+#   "watches_active": 3,
+#   "audit_log_path": "/var/log/igris/audit.log"
+# }
+```
+
+### Key Metrics
+
+| Metric | Healthy Range | Alert If |
+|--------|---------------|----------|
+| `connections_active` | < 100 | > 80 |
+| `watches_active` | < 1000 | > 800 |
+| `daemon_uptime_seconds` | Increasing | Sudden reset |
+| Audit log size | < 1 GB | > 5 GB |
+| Socket file exists | Yes | Missing |
+
+### Prometheus Exporter (Future)
+
+```yaml
+# Future: metrics endpoint
+# GET /metrics
+# igris_connections_active 2
+# igris_watches_active 3
+# igris_requests_total{method="fs.read",result="ok"} 1523
+# igris_requests_total{method="fs.write",result="denied"} 42
+```
+
+## Logging
+
+### Log Levels
+
+Set via `RUST_LOG` environment variable:
+
+```bash
+# Debug level
+RUST_LOG=debug ./target/debug/igrisd
+
+# Specific modules
+RUST_LOG=igrisd=trace,igris_ipc=debug ./target/debug/igrisd
+
+# Production
+RUST_LOG=info ./target/debug/igrisd
+```
+
+### Log Format
+
+```
+2025-01-15T10:30:45.123Z  INFO igrisd: Starting igrisd v0.1.0
+2025-01-15T10:30:45.124Z  INFO igrisd::socket: Listening on /run/user/1000/igris/igrisd.sock
+2025-01-15T10:30:45.125Z  INFO igrisd::audit: Audit log opened: /home/user/.local/state/igris/audit.log
+2025-01-15T10:30:45.126Z  INFO igrisd::perm: Connected to permission broker
+2025-01-15T10:30:45.127Z  INFO igrisd: Ready to accept connections
+```
+
+### Structured Logging (JSON)
+
+```bash
+# Future: RUST_LOG_STYLE=json
+# {"timestamp":"2025-01-15T10:30:45.123Z","level":"INFO","target":"igrisd","message":"Starting igrisd v0.1.0"}
+```
+
+## Troubleshooting
+
+### Daemon Won't Start
+
+```bash
+# 1. Check for existing socket
+ls -la ~/.igris/igrisd.sock
+# Remove if stale
+rm -f ~/.igris/igrisd.sock
+
+# 2. Check port/socket conflicts
+lsof -U | grep igrisd
+
+# 3. Check permissions
+ls -la $XDG_RUNTIME_DIR/igris/
+# Should be drwx------ owned by you
+
+# 4. Run with debug logging
+RUST_LOG=debug ./target/debug/igrisd
+```
+
+### Connection Refused
+
+```bash
+# Verify daemon is running
+pgrep -f igrisd
+
+# Verify socket path matches
+echo "Daemon: $IGRIS_SOCKET_PATH"
+echo "Client: $IGRIS_SOCKET_PATH"
+
+# Test with explicit socket
+IGRIS_SOCKET_PATH=/custom/path ./target/debug/igrisctl system.info
+```
+
+### High Memory Usage
+
+```bash
+# Check connections
+./target/debug/igrisctl system.info --json | jq '.result.igris.connections_active'
+
+# Check watches
+./target/debug/igrisctl system.info --json | jq '.result.igris.watches_active'
+
+# Restart if leaked
+systemctl restart igrisd
+```
+
+### Audit Log Issues
+
+```bash
+# Check audit log growth
+ls -lh ~/.local/state/igris/audit.log
+
+# Rotate manually
+mv ~/.local/state/igris/audit.log ~/.local/state/igris/audit.log.$(date +%Y%m%d)
+touch ~/.local/state/igris/audit.log
+chmod 600 ~/.local/state/igris/audit.log
+# Send SIGHUP to reopen (future)
+```
+
+## Performance Tuning
+
+### File Descriptor Limits
+
+```bash
+# Check current limits
+ulimit -n
+
+# Increase for high connection counts
+ulimit -n 65536
+# Or in systemd:
+# LimitNOFILE=65536
+```
+
+### Inotify Limits (for events)
+
+```bash
+# Check current
+cat /proc/sys/fs/inotify/max_user_watches
+cat /proc/sys/fs/inotify/max_user_instances
+
+# Increase for many watches
+echo 65536 | sudo tee /proc/sys/fs/inotify/max_user_watches
+echo 1024 | sudo tee /proc/sys/fs/inotify/max_user_instances
+
+# Persistent
+echo "fs.inotify.max_user_watches=65536" | sudo tee /etc/sysctl.d/99-igris.conf
+echo "fs.inotify.max_user_instances=1024" | sudo tee -a /etc/sysctl.d/99-igris.conf
+sudo sysctl -p /etc/sysctl.d/99-igris.conf
+```
+
+## Upgrading
+
+### Zero-Downtime (Future)
+
+```bash
+# Future: graceful handoff
+# 1. Start new version on different socket
+# 2. Health check new version
+# 3. Switch clients (or use socket passing)
+# 4. Drain old version
+# 5. Stop old version
+```
+
+### Current (Restart Required)
+
+```bash
+# Build new version
+cargo build --release --workspace
+
+# Stop old
+systemctl stop igrisd
+
+# Replace binary
+cp target/release/igrisd /usr/local/bin/
+
+# Start new
+systemctl start igrisd
+
+# Verify
+systemctl status igrisd
+./target/debug/igrisctl system.info
+```
+
+---
+
+## Related
+
+- [Configuration](/guides/configuration) — Environment variables
+- [Quick Start](/quick-start) — First run
+- [Security Model](/core-concepts/security-model) — Architecture
+- [Development Setup](/development/setup) — Building from source
