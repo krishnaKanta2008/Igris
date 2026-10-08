@@ -1,6 +1,7 @@
 {
   "name": "Igris",
   "description": "Documentation for Igris OS - A Linux-based, AI-native operating system environment",
+  "favicon": "/favicon.svg",
   "colors": {
     "primary": "#1a73e8",
     "light": "#1a73e8",
