@@ -1,11 +1,6 @@
 {
-  "name": "Igris OS Documentation",
+  "name": "Igris",
   "description": "Documentation for Igris OS - A Linux-based, AI-native operating system environment",
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "favicon": "/favicon.svg",
   "colors": {
     "primary": "#1a73e8",
     "light": "#1a73e8",
@@ -18,11 +13,7 @@
   "topbarLinks": [
     {
       "name": "GitHub",
-      "url": "https://github.com/igris-os/igris"
-    },
-    {
-      "name": "Discord",
-      "url": "https://discord.gg/igris-os"
+      "url": "https://github.com/krishnaKanta2008/Igris"
     }
   ],
   "topbarCtaButton": {
@@ -135,9 +126,7 @@
     }
   ],
   "footerSocials": {
-    "github": "https://github.com/igris-os/igris",
-    "discord": "https://discord.gg/igris-os",
-    "twitter": "https://twitter.com/igris_os"
+    "github": "https://github.com/krishnaKanta2008/Igris"
   },
   "version": "0.1.0",
   "versioning": {
