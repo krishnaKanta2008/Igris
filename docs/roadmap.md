@@ -22,9 +22,10 @@ confirmation flow, and append-only audit logging.
 ## Phase 3 — Process and event monitoring
 Milestone 3 (complete): read-only `process.list`, `process.stat`, and
 `process.children` over `/proc` with bounded, sanitized output and full audit.
-Remaining: guarded process control (`proc.signal`), an event provider via
-inotify/fanotify (separate milestone with a stateful IPC model), and provider
-sandboxing via cgroups/namespaces/seccomp.
+Milestone 5 (complete): guarded process control (`proc.signal`).
+Milestone 6 (complete): event observation via inotify (`events.watch`, `events.poll`,
+`events.unwatch`). Remaining: fanotify support, process event observation, and
+provider sandboxing via cgroups/namespaces/seccomp.
 
 ## Phase 4 — AI agent layer
 Agent orchestration restricted to structured tool calls, per-session capability

@@ -147,6 +147,8 @@ pub mod error_code {
     pub const FS_ERROR: &str = "FS_ERROR";
     /// An internal server error occurred.
     pub const INTERNAL: &str = "INTERNAL";
+    /// The event queue overflowed and events were lost.
+    pub const QUEUE_OVERFLOW: &str = "QUEUE_OVERFLOW";
 }
 
 /// A parsed request. Input is untrusted; use [`validate_request`] before acting.

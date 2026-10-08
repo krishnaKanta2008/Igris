@@ -190,11 +190,96 @@ ppid equals the requested pid), never recursive descendants.
 }
 ```
 
+## `system.info` result
+
+```json
+{
+  "hostname": "...",
+  "kernel_release": "...",
+  "kernel_version": "...",
+  "architecture": "...",
+  "cpu": { "model": "...", "logical_cores": 16 },
+  "memory": { "total_kb": 0, "free_kb": 0, "available_kb": 0 },
+  "uptime_seconds": 0.0
+}
+```
+
 The provider reads only fixed, well-known paths (`/proc/sys/kernel/hostname`,
 `/proc/sys/kernel/osrelease`, `/proc/sys/kernel/version`,
 `/proc/sys/kernel/arch`, `/proc/uptime`, `/proc/meminfo`, `/proc/cpuinfo`,
 `/sys/devices/system/cpu/online`). It never accepts a caller-supplied path and
 cannot be turned into a generic file-read primitive.
+
+## Event observation
+
+All `events.*` operations are read-only and use Linux inotify as the event
+source. Each connection can register up to `MAX_EVENT_WATCHES` (16) watches.
+Events are queued per watch and drained via `events.poll`. The total queued
+event count across all watches is bounded by `MAX_QUEUED_EVENTS` (256), and
+each watch's queue is limited to `MAX_EVENTS_PER_WATCH` (16). When a queue is
+full, the oldest event is dropped. The total events returned by one
+`events.poll` call is capped at `MAX_POLL_EVENTS` (128).
+
+### `events.watch`
+
+Register a filesystem event watch on an absolute path within the configured
+filesystem root (`IGRIS_FS_ROOT`).
+
+Params: `{ "path": string }` — absolute path to watch (must be within
+`IGRIS_FS_ROOT`). The path may be a file or directory; if a file, its parent
+directory is watched.
+
+```json
+{ "version": 1, "id": "req-1", "op": "events.watch", "params": { "path": "/home/user/watchdir" } }
+```
+
+Result:
+```json
+{ "version": 1, "id": "req-1", "ok": true, "result": { "watch_id": 1 } }
+```
+
+### `events.poll`
+
+Drain queued events from a watch. Non-blocking; returns immediately with
+available events (up to `max`).
+
+Params: `{ "watch_id": number, "max"?: number }` — `watch_id` from
+`events.watch`; `max` defaults to `MAX_POLL_EVENTS` (128), clamped to that
+maximum.
+
+```json
+{ "version": 1, "id": "req-2", "op": "events.poll", "params": { "watch_id": 1, "max": 10 } }
+```
+
+Result:
+```json
+{ "version": 1, "id": "req-2", "ok": true, "result": { "events": [{ "name": "fs.create", "path": "/home/user/watchdir/new_file.txt", "timestamp_unix": 1696000000, "kind": "file" }] } }
+```
+
+Event fields:
+- `name`: event type (`fs.create`, `fs.delete`, `fs.modify`, `fs.move`)
+- `path`: canonical absolute path of the affected filesystem entry
+- `timestamp_unix`: Unix timestamp (seconds since epoch) when the event was observed
+- `kind`: optional kind of the affected entry (`file`, `directory`, `symlink`, `other`)
+
+### `events.unwatch`
+
+Remove a watch by its `watch_id`.
+
+Params: `{ "watch_id": number }` — the `watch_id` returned by `events.watch`.
+
+```json
+{ "version": 1, "id": "req-3", "op": "events.unwatch", "params": { "watch_id": 1 } }
+```
+
+Result:
+```json
+{ "version": 1, "id": "req-3", "ok": true, "result": true }
+```
+
+Ownership is enforced: only the connection that created the watch can unwatch it.
+On connection close, all watches owned by that connection are automatically
+removed.
 
 ## Request pipeline (daemon)
 

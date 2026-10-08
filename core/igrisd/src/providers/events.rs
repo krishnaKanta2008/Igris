@@ -97,6 +97,8 @@ struct WatchRegistry {
     next_watch_id: u64,
     /// Tracks how many watches each connection owns for limit enforcement.
     watches_per_connection: HashMap<u64, u32>,
+    /// Reference counts for kernel watch descriptors (multiple logical watches can share a kernel wd).
+    wd_refcounts: HashMap<WatchDescriptor, u32>,
     /// Total queued events across all watches.
     total_queued_events: usize,
 }
@@ -107,6 +109,7 @@ impl WatchRegistry {
             watches: HashMap::new(),
             next_watch_id: 1,
             watches_per_connection: HashMap::new(),
+            wd_refcounts: HashMap::new(),
             total_queued_events: 0,
         }
     }
@@ -133,15 +136,38 @@ impl WatchRegistry {
 
         let watch_id = self.allocate_id().ok_or(ProviderError::MaxWatches)?;
 
-        let watch = Watch::new(watch_id, owner, path, wd);
+        let watch = Watch::new(watch_id, owner, path, wd.clone());
         self.watches.insert(watch_id, watch);
         *self.watches_per_connection.entry(owner).or_insert(0) += 1;
+        self.increment_wd_refcount(wd);
 
         Ok(watch_id)
     }
 
+    /// Increment the reference count for a kernel watch descriptor.
+    fn increment_wd_refcount(&mut self, wd: WatchDescriptor) {
+        *self.wd_refcounts.entry(wd).or_insert(0) += 1;
+    }
+
+    /// Decrement the reference count for a kernel watch descriptor.
+    ///
+    /// Returns `true` if the refcount reached zero and the kernel watch should be removed.
+    fn decrement_wd_refcount(&mut self, wd: &WatchDescriptor) -> bool {
+        if let Some(count) = self.wd_refcounts.get_mut(wd) {
+            *count -= 1;
+            if *count == 0 {
+                self.wd_refcounts.remove(wd);
+                return true;
+            }
+        }
+        false
+    }
+
     /// Remove a watch by ID, verifying ownership.
-    fn remove_watch(&mut self, owner: u64, watch_id: u64) -> Result<(), ProviderError> {
+    ///
+    /// Returns `true` if the kernel watch descriptor's refcount reached zero
+    /// and the inotify watch should be removed.
+    fn remove_watch(&mut self, owner: u64, watch_id: u64) -> Result<bool, ProviderError> {
         let watch = self
             .watches
             .get(&watch_id)
@@ -150,6 +176,8 @@ impl WatchRegistry {
         if watch.owner != owner {
             return Err(ProviderError::WatchNotFound); // Ownership violation -> NOT_FOUND
         }
+
+        let wd = watch.wd.clone();
 
         // Release queued events count.
         self.total_queued_events = self
@@ -164,7 +192,8 @@ impl WatchRegistry {
             }
         }
 
-        Ok(())
+        // Decrement wd refcount and return whether kernel watch should be removed
+        Ok(self.decrement_wd_refcount(&wd))
     }
 
     /// Poll events from a watch, verifying ownership.
@@ -175,16 +204,25 @@ impl WatchRegistry {
         max: usize,
     ) -> Result<Vec<Event>, ProviderError> {
         let max = max.clamp(1, MAX_POLL_EVENTS);
-        let watch = self
-            .watches
-            .get_mut(&watch_id)
-            .ok_or(ProviderError::WatchNotFound)?;
 
-        if watch.owner != owner {
+        // First check if watch exists and get its info without holding the lock long
+        let (owner_matches, _queued_count) = {
+            let watch = self
+                .watches
+                .get(&watch_id)
+                .ok_or(ProviderError::WatchNotFound)?;
+            (watch.owner == owner, watch.queued_count())
+        };
+
+        if !owner_matches {
             return Err(ProviderError::WatchNotFound);
         }
 
-        let events = watch.drain_events(max);
+        let events = self
+            .watches
+            .get_mut(&watch_id)
+            .ok_or(ProviderError::WatchNotFound)?
+            .drain_events(max);
         self.total_queued_events = self.total_queued_events.saturating_sub(events.len());
         Ok(events)
     }
@@ -230,6 +268,8 @@ enum ProviderError {
     InvalidPath,
     PathOutsideRoot,
     Internal,
+    QueueOverflow,
+    WatchInvalidated,
 }
 
 impl From<ProviderError> for FsFailure {
@@ -258,6 +298,16 @@ impl From<ProviderError> for FsFailure {
             ProviderError::Internal => Self {
                 code: error_code::FS_ERROR,
                 message: "filesystem error",
+                denied: false,
+            },
+            ProviderError::QueueOverflow => Self {
+                code: error_code::QUEUE_OVERFLOW,
+                message: "event queue overflowed, events lost",
+                denied: false,
+            },
+            ProviderError::WatchInvalidated => Self {
+                code: error_code::FS_ERROR,
+                message: "watch invalidated by kernel",
                 denied: false,
             },
         }
@@ -403,7 +453,44 @@ impl EventProvider {
             if let Some(watch) = registry.watches.values_mut().find(|w| w.wd == wd) {
                 // Translate inotify event mask to our event names
                 let mask = event.mask;
+
+                // Handle kernel-level queue overflow
+                if mask.contains(EventMask::Q_OVERFLOW) {
+                    let (name, kind) = ("fs.overflow".to_string(), Some("overflow".to_string()));
+                    watch.enqueue(name, kind, None);
+                    continue;
+                }
+
+                // Handle watch invalidation by kernel (watched file deleted, filesystem unmounted)
+                if mask.contains(EventMask::IGNORED) {
+                    // Watch was invalidated by kernel - remove all logical watches using this wd
+                    registry.watches.retain(|_, w| w.wd != wd);
+                    // Also remove from refcounts since kernel watch is gone
+                    registry.wd_refcounts.remove(&wd);
+                    continue;
+                }
+
+                // Handle watched file/directory deleted
+                if mask.contains(EventMask::DELETE_SELF) {
+                    let (name, kind) = ("fs.delete".to_string(), Some("directory".to_string()));
+                    watch.enqueue(name, kind, event.name);
+                    // Watch is now invalid since the watched file/directory was deleted
+                    registry.watches.retain(|_, w| w.wd != wd);
+                    registry.wd_refcounts.remove(&wd);
+                    continue;
+                }
+
+                // Handle watched file/directory moved
+                if mask.contains(EventMask::MOVE_SELF) {
+                    let (name, kind) = ("fs.move".to_string(), Some("directory".to_string()));
+                    watch.enqueue(name, kind, event.name);
+                    continue;
+                }
+
+                // Translate inotify event mask to our event names
+                let mask = event.mask;
                 let filename = event.name;
+
                 if mask.contains(EventMask::CREATE) {
                     let (name, kind) = translate_mask(EventMask::CREATE);
                     watch.enqueue(name, kind, filename);
@@ -434,7 +521,7 @@ impl EventProvider {
     }
 
     pub fn unwatch(&self, owner: u64, watch_id: u64) -> Result<bool, FsFailure> {
-        let wd = {
+        let (should_remove, wd) = {
             let mut registry = self.registry.lock().map_err(|_| ProviderError::Internal)?;
             let watch = registry
                 .watches
@@ -445,18 +532,20 @@ impl EventProvider {
                 return Err(ProviderError::WatchNotFound.into());
             }
             let wd = watch.wd.clone();
-            registry.remove_watch(owner, watch_id)?;
-            wd
+            let should_remove = registry.remove_watch(owner, watch_id)?;
+            (should_remove, wd)
         };
 
-        // Remove the inotify watch
-        let mut inotify = self
-            .inotify_source
-            .lock()
-            .map_err(|_| ProviderError::Internal)?;
-        inotify
-            .remove_watch(wd)
-            .map_err(|_| ProviderError::Internal)?;
+        // Remove the inotify watch only if refcount reached zero
+        if should_remove {
+            let mut inotify = self
+                .inotify_source
+                .lock()
+                .map_err(|_| ProviderError::Internal)?;
+            inotify
+                .remove_watch(wd)
+                .map_err(|_| ProviderError::Internal)?;
+        }
 
         Ok(true)
     }
@@ -465,7 +554,7 @@ impl EventProvider {
     ///
     /// Called when a connection is closed.
     pub fn cleanup_connection(&self, owner: u64) {
-        let wds = {
+        let wds_to_remove = {
             let mut registry = match self.registry.lock() {
                 Ok(r) => r,
                 Err(e) => {
@@ -486,10 +575,15 @@ impl EventProvider {
 
             let mut wds = Vec::new();
             for id in watch_ids {
+                // Get the wd first, then remove the watch
                 if let Some(watch) = registry.watches.get(&id) {
-                    wds.push(watch.wd.clone());
+                    let wd = watch.wd.clone();
+                    if let Ok(should_remove) = registry.remove_watch(owner, id) {
+                        if should_remove {
+                            wds.push(wd);
+                        }
+                    }
                 }
-                let _ = registry.remove_watch(owner, id);
             }
             wds
         };
@@ -504,8 +598,18 @@ impl EventProvider {
                 return;
             }
         };
-        for wd in wds {
-            let _ = inotify.remove_watch(wd);
+        for wd in wds_to_remove {
+            // Decrement refcount and only remove inotify watch if refcount reaches 0
+            let should_remove = {
+                let mut registry = match self.registry.lock() {
+                    Ok(r) => r,
+                    Err(_) => return,
+                };
+                registry.decrement_wd_refcount(&wd)
+            };
+            if should_remove {
+                let _ = inotify.remove_watch(wd);
+            }
         }
     }
 }

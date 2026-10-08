@@ -5,7 +5,7 @@ kernel is the foundation; the project builds a progressively integrated AI
 system layer on top of it, connected through structured tools and APIs and
 governed by a least-privilege permission model.
 
-> **Status: Milestone 6 (event observation infrastructure) implemented.**
+> **Status: Milestone 6 (event observation) implemented.**
 > The `igrisd` daemon, `igrisctl` client, default-deny permission engine,
 > structured Unix-socket IPC with append-only audit logging, and the following
 > tool families are functional:
@@ -13,11 +13,13 @@ governed by a least-privilege permission model.
 > - **Core**: `system.info`
 > - **Filesystem**: `fs.list`, `fs.stat`, `fs.read`, `fs.write`, `fs.delete`
 > - **Process**: `process.list`, `process.stat`, `process.children`, `proc.signal`
-> - **Event observation (infrastructure)**: `events.watch`, `events.poll`, `events.unwatch`
+> - **Event observation**: `events.watch`, `events.poll`, `events.unwatch`
 >
-> The event-observation protocol and stateful provider are implemented.
-> Real filesystem event production through inotify/fanotify is **not yet
-> implemented** and will be added in a follow-up M6 step.
+> The event-observation protocol, stateful provider, and real filesystem event
+> production via Linux inotify are implemented.
+> Process event observation is not implemented.
+> Streaming IPC is not implemented.
+> The AI agent layer remains a Phase 0 scaffold.
 > Process event observation is not implemented.
 > Streaming IPC is not implemented.
 > The AI agent layer remains a Phase 0 scaffold.
@@ -86,7 +88,6 @@ Hardware
 - Automatic cleanup of watches on connection disconnect
 
 > **Not yet implemented:**
-> - Real filesystem event production (inotify/fanotify integration)
 > - Process event observation
 > - Streaming IPC / WebSocket-style event delivery
 > - Event filtering, regex matching, or field projections
