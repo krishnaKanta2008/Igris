@@ -4,6 +4,10 @@ members = [
     "core/igris-proto",
     "core/igris-permd",
     "core/igris-sandbox",
+    "core/igris-tool-registry",
+    "core/igris-session",
+    "core/igris-confirmation",
+    "core/igris-mock-agent",
     "core/igris-providers",
     "core/igrisd",
     "core/igrisctl",
@@ -21,4 +25,8 @@ serde_json = "1.0"
 igris-proto = { path = "core/igris-proto" }
 igris-permd = { path = "core/igris-permd" }
 igris-sandbox = { path = "core/igris-sandbox" }
+igris-tool-registry = { path = "core/igris-tool-registry" }
+igris-session = { path = "core/igris-session" }
+igris-confirmation = { path = "core/igris-confirmation" }
+igris-mock-agent = { path = "core/igris-mock-agent" }
 igris-providers = { path = "core/igris-providers" }

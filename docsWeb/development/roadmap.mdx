@@ -24,7 +24,8 @@ Igris OS follows an incremental, test-driven roadmap with clearly defined milest
 | **Phase 3** | Process Observation & Control (Milestones 3, 5) | ✅ Complete |
 | **Phase 3 cont.** | Event Observation (Milestone 6) | ✅ Complete |
 | **Phase 3 cont.** | Provider Sandboxing (Milestone 7) | ✅ Complete |
-| **Phase 4** | AI Agent Layer | 🚧 Scaffold Only |
+| **Phase 3 cont.** | AI Agent Security & Tool-Calling (Milestone 8) | ✅ Complete |
+| **Phase 4** | AI Agent Orchestration | 📋 Planned |
 | **Phase 5** | OS-Level Integration | 📋 Planned |
 | **Phase 6** | Installable Igris OS Environment | 📋 Planned |
 
@@ -93,6 +94,18 @@ Igris OS follows an incremental, test-driven roadmap with clearly defined milest
 - ✅ seccomp BPF filter with default-deny
 - ✅ Provider lifecycle managed by `igrisd` (spawn, monitor, shutdown)
 - ✅ Fail-closed: sandbox setup failure aborts provider startup
+
+### Milestone 8: AI Agent Security & Tool-Calling Foundation
+- ✅ Structured tool registry (`igris-tool-registry`) with 12 tools and explicit JSON schemas
+- ✅ Session-scoped capabilities (`igris-session`) with least-privilege grants, expiry, and revocation
+- ✅ Confirmation gate (`igris-confirmation`) for sensitive operations (fs.write, fs.delete, proc.signal)
+- ✅ Audit correlation IDs linking session → tool → policy → confirmation → provider → result
+- ✅ Deterministic mock agent (`igris-mock-agent`) exercising full M8 pipeline
+- ✅ Security tests: 13 scenarios covering authorization, capability, confirmation, replay, untrusted output
+- ✅ Protocol extensions: `session_id` and `confirmation_token` fields in Request
+- ✅ New error codes: SESSION_NOT_FOUND, SESSION_EXPIRED, SESSION_REVOKED, MISSING_CAPABILITY, CONFIRMATION_REQUIRED, CONFIRMATION_INVALID, TOOL_NOT_FOUND, SCHEMA_VALIDATION_FAILED
+- ✅ Documentation: ADR 0009, API reference, mock agent guide
+- ✅ All 13 mock agent scenarios pass; 80 library tests pass
 
 ---
 

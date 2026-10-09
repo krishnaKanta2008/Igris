@@ -149,6 +149,22 @@ pub mod error_code {
     pub const INTERNAL: &str = "INTERNAL";
     /// The event queue overflowed and events were lost.
     pub const QUEUE_OVERFLOW: &str = "QUEUE_OVERFLOW";
+    /// Session not found or invalid.
+    pub const SESSION_NOT_FOUND: &str = "SESSION_NOT_FOUND";
+    /// Session has expired.
+    pub const SESSION_EXPIRED: &str = "SESSION_EXPIRED";
+    /// Session has been revoked.
+    pub const SESSION_REVOKED: &str = "SESSION_REVOKED";
+    /// Required capability not granted to session.
+    pub const MISSING_CAPABILITY: &str = "MISSING_CAPABILITY";
+    /// Confirmation required but not provided or invalid.
+    pub const CONFIRMATION_REQUIRED: &str = "CONFIRMATION_REQUIRED";
+    /// Confirmation token not found, expired, or already used.
+    pub const CONFIRMATION_INVALID: &str = "CONFIRMATION_INVALID";
+    /// Tool not found in registry.
+    pub const TOOL_NOT_FOUND: &str = "TOOL_NOT_FOUND";
+    /// Tool schema validation failed.
+    pub const SCHEMA_VALIDATION_FAILED: &str = "SCHEMA_VALIDATION_FAILED";
 }
 
 /// A parsed request. Input is untrusted; use [`validate_request`] before acting.
@@ -159,6 +175,12 @@ pub struct Request {
     pub op: String,
     #[serde(default)]
     pub params: serde_json::Value,
+    /// Optional session ID for agent capability authorization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Optional confirmation token for sensitive operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_token: Option<String>,
 }
 
 /// A protocol-level validation failure.
@@ -645,6 +667,8 @@ mod tests {
             id: "req-1".to_string(),
             op: OP_SYSTEM_INFO.to_string(),
             params: serde_json::json!({}),
+            session_id: None,
+            confirmation_token: None,
         }
     }
 

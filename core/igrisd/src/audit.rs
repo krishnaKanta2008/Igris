@@ -43,6 +43,12 @@ pub struct AuditRecord {
     pub result: AuditResult,
     /// Peer identifier (the local side of the Unix socket).
     pub peer: Option<String>,
+    /// Correlation ID linking session, tool, authorization, confirmation, and provider execution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// Pipeline stage where the record was generated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage: Option<String>,
 }
 
 /// Append-only audit log writer.
@@ -143,6 +149,8 @@ mod tests {
                 decision: "allow".to_string(),
                 result: AuditResult::Success,
                 peer: None,
+                correlation_id: None,
+                stage: None,
             })
             .expect("record");
         }

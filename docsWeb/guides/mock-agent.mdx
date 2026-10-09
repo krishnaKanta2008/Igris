@@ -1,0 +1,101 @@
+---
+title: Mock Agent Guide
+description: Using the deterministic mock agent to test the M8 tool-calling pipeline
+---
+
+# Mock Agent Guide
+
+The `igris-mock-agent` binary is a deterministic test harness that exercises the complete M8 tool-calling pipeline without an LLM.
+
+## Purpose
+
+- Validates the full authorization and execution path
+- Demonstrates security properties (capability checks, confirmation, audit)
+- Runs in CI without privileged sandbox access
+- Treats provider output as untrusted data
+
+## Running the Mock Agent
+
+```bash
+# Build and run
+cargo run -p igris-mock-agent
+
+# Run tests only
+cargo test -p igris-mock-agent
+```
+
+## Test Scenarios
+
+The mock agent runs 13 deterministic scenarios:
+
+| # | Scenario | What It Verifies |
+|---|----------|------------------|
+| 1 | Permitted read-only operation succeeds | `fs.read` with `filesystem_read` capability works |
+| 2 | Unknown tool is rejected | `unknown.tool` not in registry → `TOOL_NOT_FOUND` |
+| 3 | Invalid arguments are rejected | Missing required params → `BAD_REQUEST` |
+| 4 | Missing capability is denied | `fs.write` needs `filesystem_write` |
+| 5 | Expired/revoked capability denied | Session revocation and TTL expiry |
+| 6 | Cross-session capability use denied | Session isolation |
+| 7 | Sensitive operation without confirmation denied | `CONFIRMATION_REQUIRED` |
+| 8 | Denied confirmation never executes | `deny()` → no token → execution blocked |
+| 9 | Authorized confirmation follows lifecycle | `request` → `approve` → `consume` |
+| 10 | Replayed confirmation rejected | Second `consume` → `CONFIRMATION_ALREADY_USED` |
+| 11 | Provider failure produces structured error | Error codes exist |
+| 12 | Audit correlation preserved | Correlation IDs generated |
+| 13 | Malicious-looking output treated as data | Suspicious strings never executed |
+
+## Example Output
+
+```
+╔════════════════════════════════════════════════════════════════════╗
+║          Igris M8 Mock Agent — Deterministic Test Harness         ║
+║      Testing AI Agent Security & Tool-Calling Foundation          ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+Test: Permitted read-only operation succeeds ... ✅ PASS
+Test: Unknown tool is rejected ... ✅ PASS
+Test: Invalid arguments are rejected ... ✅ PASS
+Test: Missing capability is denied ... ✅ PASS
+Test: Expired/revoked capability is denied ... ✅ PASS
+Test: Cross-session capability use is denied ... ✅ PASS
+Test: Sensitive operation without confirmation is denied ... ✅ PASS
+Test: Denied confirmation never executes ... ✅ PASS
+Test: Authorized confirmation follows lifecycle ... ✅ PASS
+Test: Replayed confirmation is rejected ... ✅ PASS
+Test: Provider failure produces structured error ... ✅ PASS
+Test: Audit correlation preserved ... ✅ PASS
+Test: Malicious-looking output treated as data ... ✅ PASS
+
+╔════════════════════════════════════════════════════════════════════╗
+║                        TEST SUMMARY                                ║
+╠═══════════════════════════════════════════════════════════════════╣
+║  Passed: 13                                                         ║
+║  Failed:  0                                                         ║
+║  Total:   13                                                        ║
+╚═══════════════════════════════════════════════════════════════════╝
+```
+
+## Integration with CI
+
+The mock agent runs in standard CI environments (no privileged sandbox needed):
+
+```yaml
+# .github/workflows/ci.yml
+- name: Run M8 mock agent tests
+  run: cargo test -p igris-mock-agent
+```
+
+## Extending the Mock Agent
+
+To add new test scenarios:
+
+1. Add variant to `Scenario` enum in `core/igris-mock-agent/src/main.rs`
+2. Add entry to `scenarios` array
+3. Implement match arm in `run_scenario()`
+4. Add corresponding `#[test]` function
+
+## Code Reference
+
+- Main binary: `core/igris-mock-agent/src/main.rs`
+- Scenario enum: `core/igris-mock-agent/src/main.rs` — `Scenario`
+- Test runner: `core/igris-mock-agent/src/main.rs` — `run_scenario()`

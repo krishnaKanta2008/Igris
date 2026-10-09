@@ -54,6 +54,8 @@ pub fn build_request(op: &str, params: serde_json::Value) -> Request {
         id: new_request_id(),
         op: op.to_string(),
         params,
+        session_id: None,
+        confirmation_token: None,
     }
 }
 

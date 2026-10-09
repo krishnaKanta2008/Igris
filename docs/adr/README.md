@@ -18,3 +18,4 @@ Format: lightweight [MADR](https://adr.github.io/madr/).
 | [0006](0006-unix-socket-ipc-boundary.md) | Unix-socket IPC boundary, versioned bounded protocol, audit | Accepted |
 | [0007](0007-filesystem-boundary-and-read-only-tools.md) | Filesystem boundary and read-only filesystem tools | Accepted |
 | [0008](0008-process-observation-and-proc-boundary.md) | Process observation and /proc boundary | Accepted |
+| [0009](0009-agent-tool-calling-and-sandboxing.md) | AI Agent tool calling with sandboxed providers, session capabilities, and confirmation gate | Proposed |

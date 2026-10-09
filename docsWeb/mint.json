@@ -76,7 +76,8 @@
         "core-concepts/architecture",
         "core-concepts/security-model",
         "core-concepts/ipc-protocol",
-        "core-concepts/event-system"
+        "core-concepts/event-system",
+        "core-concepts/agent-trust-boundaries"
       ]
     },
     {
@@ -87,7 +88,10 @@
         "api-reference/filesystem-tools",
         "api-reference/process-tools",
         "api-reference/event-tools",
-        "api-reference/permission-system"
+        "api-reference/permission-system",
+        "api-reference/tool-registry",
+        "api-reference/session-capabilities",
+        "api-reference/confirmation-gate"
       ]
     },
     {
@@ -98,7 +102,8 @@
         "guides/running-daemon",
         "guides/using-igrisctl",
         "guides/building-from-source",
-        "guides/writing-policies"
+        "guides/writing-policies",
+        "guides/mock-agent"
       ]
     },
     {
@@ -122,7 +127,8 @@
         "adr/0005-privilege-separation-and-default-deny",
         "adr/0006-unix-socket-ipc-boundary",
         "adr/0007-filesystem-boundary-and-read-only-tools",
-        "adr/0008-process-observation-and-proc-boundary"
+        "adr/0008-process-observation-and-proc-boundary",
+        "adr/0009-agent-tool-calling-and-sandboxing"
       ]
     }
   ],

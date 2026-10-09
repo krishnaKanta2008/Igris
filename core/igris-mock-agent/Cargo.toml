@@ -1,33 +1,30 @@
 [package]
-name = "igrisd"
-description = "Igris core service daemon: privileged IPC hub routing to narrowly scoped providers."
+name = "igris-mock-agent"
+description = "Igris deterministic mock agent for testing the M8 tool-calling pipeline."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 
-[lib]
-name = "igrisd"
-path = "src/lib.rs"
-
 [[bin]]
-name = "igrisd"
+name = "igris-mock-agent"
 path = "src/main.rs"
 
 [dependencies]
 igris-proto.workspace = true
-igris-permd.workspace = true
-igris-sandbox.workspace = true
-igris-tool-registry.workspace = true
 igris-session.workspace = true
 igris-confirmation.workspace = true
+igris-tool-registry.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-libc = "0.2"
-inotify = "0.10"
+thiserror = "1.0"
 uuid = { version = "1.0", features = ["v4", "serde", "fast-rng"] }
+chrono = { version = "0.4", features = ["serde"] }
+tempfile = "3.0"
 
 [dev-dependencies]
 igris-proto.workspace = true
-igris-permd.workspace = true
+igris-session.workspace = true
+igris-confirmation.workspace = true
+igris-tool-registry.workspace = true
 serde_json.workspace = true

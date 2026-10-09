@@ -6,9 +6,12 @@
 //! 1. frame and size check (oversized requests are rejected before the body is read),
 //! 2. JSON parse,
 //! 3. protocol validation (version, id, params, supported operation),
-//! 4. permission decision (default deny),
-//! 5. dispatch to the sandboxed provider,
-//! 6. one audit record per request.
+//! 4. tool registry validation (tool exists, schema validation),
+//! 5. session capability authorization (if session_id provided),
+//! 6. confirmation gate (if confirmation required),
+//! 7. permission decision (default deny),
+//! 8. dispatch to the sandboxed provider,
+//! 9. one audit record per request with correlation ID.
 //!
 //! Connections are handled on their own thread; the audit log is shared behind
 //! a mutex. The socket is created with `0600` permissions so only the owning
@@ -23,11 +26,15 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use igris_confirmation::{ConfirmationGate, ConfirmationToken};
 use igris_permd::{Decision, Policy};
 use igris_proto::{
-    error_code, read_frame, validate_request, write_response, ReadFrame, Request, Response,
-    MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE,
+    error_code, read_frame, validate_operation_params, validate_request, write_response, ReadFrame,
+    Request, Response, MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE,
 };
+use igris_session::{SessionId, SessionManager};
+use igris_tool_registry::{ToolId, ToolRegistry};
+use std::str::FromStr;
 
 use crate::audit::{now_rfc3339, AuditLog, AuditRecord, AuditResult};
 use crate::config::Config;
@@ -40,7 +47,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// State shared with connection-handling threads.
 #[derive(Clone)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct Shared {
     policy: Arc<Policy>,
     audit: Arc<Mutex<AuditLog>>,
@@ -50,6 +57,14 @@ struct Shared {
     writable_paths: Vec<PathBuf>,
     /// Sandboxed provider manager.
     providers: Arc<Mutex<ProviderManager>>,
+    /// Tool registry for schema validation.
+    tool_registry: Arc<ToolRegistry>,
+    /// Session manager for agent capability authorization.
+    session_manager: Arc<SessionManager>,
+    /// Confirmation gate for sensitive operations.
+    confirmation_gate: Arc<ConfirmationGate>,
+    /// Correlation ID counter for audit trail.
+    correlation_id: Arc<AtomicU64>,
 }
 
 /// The daemon listener and its shared state.
@@ -120,6 +135,14 @@ impl Server {
             &provider_dir,
         )?));
 
+        // Initialize M8 components
+        let tool_registry = Arc::new(igris_tool_registry::default_registry());
+        let session_manager = Arc::new(SessionManager::new(tool_registry.clone()));
+        let confirmation_gate = Arc::new(ConfirmationGate::new(
+            session_manager.clone(),
+            tool_registry.clone(),
+        ));
+
         Ok(Self {
             listener,
             socket_path: config.socket_path.clone(),
@@ -129,6 +152,10 @@ impl Server {
                 fs_root,
                 writable_paths,
                 providers,
+                tool_registry,
+                session_manager,
+                confirmation_gate,
+                correlation_id: Arc::new(AtomicU64::new(1)),
             },
             running: Arc::new(AtomicBool::new(true)),
             next_connection_id: AtomicU64::new(1),
@@ -189,6 +216,14 @@ impl Server {
             provider_dir,
         }));
 
+        // Initialize M8 components
+        let tool_registry = Arc::new(igris_tool_registry::default_registry());
+        let session_manager = Arc::new(SessionManager::new(tool_registry.clone()));
+        let confirmation_gate = Arc::new(ConfirmationGate::new(
+            session_manager.clone(),
+            tool_registry.clone(),
+        ));
+
         Ok(Self {
             listener,
             socket_path: config.socket_path.clone(),
@@ -198,6 +233,10 @@ impl Server {
                 fs_root,
                 writable_paths,
                 providers,
+                tool_registry,
+                session_manager,
+                confirmation_gate,
+                correlation_id: Arc::new(AtomicU64::new(1)),
             },
             running: Arc::new(AtomicBool::new(true)),
             next_connection_id: AtomicU64::new(1),
@@ -277,13 +316,15 @@ fn serve_stream(mut stream: UnixStream, shared: &Shared, connection_id: u64) -> 
             match frame {
                 ReadFrame::Closed => return Ok(()),
                 ReadFrame::TooLarge { declared } => {
-                    record(
+                    record_audit(
                         shared,
                         &peer,
                         None,
                         None,
+                        None,
                         Decision::Deny,
                         AuditResult::Error,
+                        "oversized_request",
                     );
                     let response = Response::error(
                         None,
@@ -320,6 +361,12 @@ fn serve_stream(mut stream: UnixStream, shared: &Shared, connection_id: u64) -> 
     result
 }
 
+/// Generate a correlation ID for audit trail.
+fn next_correlation_id(shared: &Shared) -> String {
+    let id = shared.correlation_id.fetch_add(1, Ordering::Relaxed);
+    format!("cid-{:016x}", id)
+}
+
 /// Parse, validate, authorize, and execute one request payload.
 fn handle_payload(
     bytes: &[u8],
@@ -327,10 +374,21 @@ fn handle_payload(
     peer: &Option<String>,
     _connection_id: u64,
 ) -> Response {
+    let correlation_id = next_correlation_id(shared);
+
     let request: Request = match serde_json::from_slice(bytes) {
         Ok(request) => request,
         Err(e) => {
-            record(shared, peer, None, None, Decision::Deny, AuditResult::Error);
+            record_audit(
+                shared,
+                peer,
+                None,
+                None,
+                Some(correlation_id.clone()),
+                Decision::Deny,
+                AuditResult::Error,
+                "malformed_request",
+            );
             return Response::error(
                 None,
                 error_code::BAD_REQUEST,
@@ -345,39 +403,246 @@ fn handle_payload(
         Some(request.id.clone())
     };
 
+    // Step 1: Protocol validation (version, id, params, supported operation)
     if let Err(e) = validate_request(&request) {
-        record(
+        record_audit(
             shared,
             peer,
             id_for_error.clone(),
             Some(request.op.clone()),
+            Some(correlation_id.clone()),
             Decision::Deny,
             AuditResult::Error,
+            "protocol_validation_failed",
         );
         return Response::error(id_for_error, e.code, e.message);
     }
 
-    if let Err(e) = igris_proto::validate_operation_params(&request.op, &request.params) {
-        record(
+    // Step 2: Tool registry validation
+    let tool_id = ToolId::new(&request.op);
+    let tool = match shared.tool_registry.get(&tool_id) {
+        Some(t) => t,
+        None => {
+            record_audit(
+                shared,
+                peer,
+                id_for_error.clone(),
+                Some(request.op.clone()),
+                Some(correlation_id.clone()),
+                Decision::Deny,
+                AuditResult::Error,
+                "unknown_tool",
+            );
+            return Response::error(
+                id_for_error,
+                error_code::TOOL_NOT_FOUND,
+                format!("unknown tool: {}", request.op),
+            );
+        }
+    };
+
+    // Step 3: Validate operation parameters against tool schema
+    if let Err(e) = validate_operation_params(&request.op, &request.params) {
+        record_audit(
             shared,
             peer,
             id_for_error.clone(),
             Some(request.op.clone()),
+            Some(correlation_id.clone()),
             Decision::Deny,
             AuditResult::Error,
+            "schema_validation_failed",
         );
         return Response::error(id_for_error, e.code, e.message);
     }
 
+    // Step 4: Session capability authorization (if session_id provided)
+    let session_id = request
+        .session_id
+        .as_ref()
+        .and_then(|s| SessionId::from_str(s).ok());
+    if let Some(ref sid) = session_id {
+        if let Err(e) = shared.session_manager.validate_capability(sid, &tool_id) {
+            let error_code = match e {
+                igris_session::SessionError::SessionNotFound(_) => error_code::SESSION_NOT_FOUND,
+                igris_session::SessionError::SessionExpired => error_code::SESSION_EXPIRED,
+                igris_session::SessionError::SessionRevoked => error_code::SESSION_REVOKED,
+                igris_session::SessionError::MissingCapability(_) => error_code::MISSING_CAPABILITY,
+                _ => error_code::SESSION_NOT_FOUND,
+            };
+            record_audit(
+                shared,
+                peer,
+                Some(request.id.clone()),
+                Some(request.op.clone()),
+                Some(correlation_id.clone()),
+                Decision::Deny,
+                AuditResult::Denied,
+                "capability_check_failed",
+            );
+            return Response::error(
+                Some(request.id.clone()),
+                error_code,
+                format!("session capability check failed: {}", e),
+            );
+        }
+    }
+
+    // Step 5: Confirmation gate (if tool requires confirmation)
+    if tool.requires_confirmation() {
+        let confirmation_token = request
+            .confirmation_token
+            .as_ref()
+            .and_then(|t| t.parse::<ConfirmationToken>().ok());
+
+        if confirmation_token.is_none() {
+            // No token provided - create confirmation request
+            if let Some(ref sid) = session_id {
+                let request_result = shared.confirmation_gate.request_confirmation(
+                    sid,
+                    &tool_id,
+                    request.params.clone(),
+                );
+                match request_result {
+                    Ok(conf_request) => {
+                        record_audit(
+                            shared,
+                            peer,
+                            Some(request.id.clone()),
+                            Some(request.op.clone()),
+                            Some(correlation_id.clone()),
+                            Decision::Deny,
+                            AuditResult::Denied,
+                            "confirmation_required",
+                        );
+                        return Response::error(
+                            Some(request.id.clone()),
+                            error_code::CONFIRMATION_REQUIRED,
+                            format!(
+                                "confirmation required for operation {}: use confirmation_id {}",
+                                request.op, conf_request.id
+                            ),
+                        );
+                    }
+                    Err(e) => {
+                        record_audit(
+                            shared,
+                            peer,
+                            Some(request.id.clone()),
+                            Some(request.op.clone()),
+                            Some(correlation_id.clone()),
+                            Decision::Deny,
+                            AuditResult::Error,
+                            "confirmation_request_failed",
+                        );
+                        return Response::error(
+                            Some(request.id.clone()),
+                            error_code::INTERNAL,
+                            format!("confirmation request failed: {}", e),
+                        );
+                    }
+                }
+            } else {
+                // No session but confirmation required
+                record_audit(
+                    shared,
+                    peer,
+                    Some(request.id.clone()),
+                    Some(request.op.clone()),
+                    Some(correlation_id.clone()),
+                    Decision::Deny,
+                    AuditResult::Denied,
+                    "confirmation_required_no_session",
+                );
+                return Response::error(
+                    Some(request.id.clone()),
+                    error_code::CONFIRMATION_REQUIRED,
+                    format!(
+                        "confirmation required for operation {} but no session provided",
+                        request.op
+                    ),
+                );
+            }
+        } else {
+            // Token provided - validate and consume
+            let Some(token) = confirmation_token else {
+                // This should not happen since we checked is_none() above
+                return Response::error(
+                    Some(request.id.clone()),
+                    error_code::CONFIRMATION_INVALID,
+                    "confirmation token unexpectedly missing".to_string(),
+                );
+            };
+            if let Some(ref sid) = session_id {
+                if let Err(e) = shared.confirmation_gate.validate_and_consume(
+                    sid,
+                    &tool_id,
+                    &request.params,
+                    &token,
+                ) {
+                    let error_code = match e {
+                        igris_confirmation::ConfirmationError::ConfirmationNotFound(_) => {
+                            error_code::CONFIRMATION_INVALID
+                        }
+                        igris_confirmation::ConfirmationError::ConfirmationAlreadyUsed => {
+                            error_code::CONFIRMATION_INVALID
+                        }
+                        igris_confirmation::ConfirmationError::ConfirmationExpired => {
+                            error_code::CONFIRMATION_INVALID
+                        }
+                        igris_confirmation::ConfirmationError::ConfirmationMismatch => {
+                            error_code::CONFIRMATION_INVALID
+                        }
+                        _ => error_code::CONFIRMATION_INVALID,
+                    };
+                    record_audit(
+                        shared,
+                        peer,
+                        Some(request.id.clone()),
+                        Some(request.op.clone()),
+                        Some(correlation_id.clone()),
+                        Decision::Deny,
+                        AuditResult::Denied,
+                        "confirmation_validation_failed",
+                    );
+                    return Response::error(
+                        Some(request.id.clone()),
+                        error_code,
+                        format!("confirmation validation failed: {}", e),
+                    );
+                }
+            } else {
+                record_audit(
+                    shared,
+                    peer,
+                    Some(request.id.clone()),
+                    Some(request.op.clone()),
+                    Some(correlation_id.clone()),
+                    Decision::Deny,
+                    AuditResult::Denied,
+                    "confirmation_no_session",
+                );
+                return Response::error(
+                    Some(request.id.clone()),
+                    error_code::CONFIRMATION_REQUIRED,
+                    "confirmation token provided but no session_id".to_string(),
+                );
+            }
+        }
+    }
+
+    // Step 6: Permission decision (default deny)
     let decision = shared.policy.evaluate(&request.op);
     if decision == Decision::Deny {
-        record(
+        record_audit(
             shared,
             peer,
             Some(request.id.clone()),
             Some(request.op.clone()),
+            Some(correlation_id.clone()),
             Decision::Deny,
             AuditResult::Denied,
+            "policy_denied",
         );
         return Response::error(
             Some(request.id.clone()),
@@ -386,17 +651,19 @@ fn handle_payload(
         );
     }
 
-    // Forward request to sandboxed provider
+    // Step 7: Forward request to sandboxed provider
     let providers = match shared.providers.lock() {
         Ok(p) => p,
         Err(_) => {
-            record(
+            record_audit(
                 shared,
                 peer,
                 Some(request.id.clone()),
                 Some(request.op.clone()),
+                Some(correlation_id.clone()),
                 Decision::Allow,
                 AuditResult::Error,
+                "provider_lock_poisoned",
             );
             return Response::error(
                 Some(request.id.clone()),
@@ -408,24 +675,28 @@ fn handle_payload(
 
     match providers.forward_request(&request) {
         Ok(response) => {
-            record(
+            record_audit(
                 shared,
                 peer,
                 Some(request.id.clone()),
                 Some(request.op.clone()),
+                Some(correlation_id.clone()),
                 Decision::Allow,
                 AuditResult::Success,
+                "success",
             );
             response
         }
         Err(e) => {
-            record(
+            record_audit(
                 shared,
                 peer,
                 Some(request.id.clone()),
                 Some(request.op.clone()),
+                Some(correlation_id.clone()),
                 Decision::Allow,
                 AuditResult::Error,
+                "provider_error",
             );
             Response::error(
                 Some(request.id.clone()),
@@ -436,14 +707,17 @@ fn handle_payload(
     }
 }
 
-/// Append one audit record, ignoring a poisoned lock (logging must not abort).
-fn record(
+/// Append one audit record with correlation ID, ignoring a poisoned lock (logging must not abort).
+#[allow(clippy::too_many_arguments)]
+fn record_audit(
     shared: &Shared,
     peer: &Option<String>,
     request_id: Option<String>,
     operation: Option<String>,
+    correlation_id: Option<String>,
     decision: Decision,
     result: AuditResult,
+    stage: &str,
 ) {
     let entry = AuditRecord {
         timestamp: now_rfc3339(),
@@ -452,6 +726,8 @@ fn record(
         decision: decision.as_str().to_string(),
         result,
         peer: peer.clone(),
+        correlation_id,
+        stage: Some(stage.to_string()),
     };
     if let Ok(mut log) = shared.audit.lock() {
         let _ = log.record(&entry);

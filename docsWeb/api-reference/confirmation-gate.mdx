@@ -1,0 +1,142 @@
+---
+title: Confirmation Gate
+description: Explicit user confirmation for sensitive AI agent operations
+---
+
+# Confirmation Gate
+
+The confirmation gate enforces human-in-the-loop approval for sensitive operations. The AI agent **cannot approve its own confirmations** — an external decision is required.
+
+## Sensitive Operations
+
+Operations requiring confirmation (from tool registry):
+
+| Tool | Capability | Reason |
+|------|------------|--------|
+| `fs.write` | `filesystem_write` | Creates/overwrites files |
+| `fs.delete` | `filesystem_write` | Deletes files/symlinks |
+| `proc.signal` | `process_control` | Sends SIGTERM to processes |
+
+## Confirmation Lifecycle
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   REQUEST   │────▶│   PENDING   │────▶│  APPROVED   │────▶│  CONSUMED   │
+│  CONFIRM    │     │  (AWAITING) │     │  (TOKEN)    │     │  (USED)     │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+                           │                    │
+                           │                    ▼
+                           │            ┌─────────────┐
+                           └───────────▶│    DENIED   │
+                                        └─────────────┘
+```
+
+## Confirmation Request
+
+When a sensitive operation is requested without a token:
+
+```rust
+let conf_request = confirmation_gate.request_confirmation(
+    &session_id,
+    &tool_id,
+    arguments,  // Exact validated arguments
+)?;
+```
+
+The request contains:
+- `id`: Cryptographically random `ConfirmationId` (UUIDv4)
+- `session_id`: Owning session
+- `tool_id`: Operation being confirmed
+- `arguments`: Exact validated parameters
+- `created_at`: Timestamp
+- `expires_at`: Default 5 minutes (configurable)
+- `status`: `Pending`
+
+## User Decision
+
+External system presents request to user and calls:
+
+### Approve
+
+```rust
+let result = confirmation_gate.approve(&conf_request.id)?;
+assert_eq!(result.status, ConfirmationStatus::Approved);
+let token = result.token.unwrap(); // One-time ConfirmationToken
+```
+
+### Deny
+
+```rust
+let result = confirmation_gate.deny(&conf_request.id)?;
+assert_eq!(result.status, ConfirmationStatus::Denied);
+assert!(result.token.is_none());
+```
+
+## Token Consumption
+
+Agent re-submits request with token:
+
+```rust
+confirmation_gate.validate_and_consume(
+    &session_id,
+    &tool_id,
+    &arguments,
+    &token,
+)?;
+```
+
+Token validation:
+- Must match session, tool, and **exact** arguments
+- Must be `Approved` status (not `Pending`, `Denied`, `Expired`, `Consumed`)
+- Single-use: second consume returns `CONFIRMATION_ALREADY_USED`
+
+## Error Handling
+
+| Error | Cause |
+|-------|-------|
+| `CONFIRMATION_REQUIRED` | Sensitive op requested without token |
+| `CONFIRMATION_INVALID` | Token missing, expired, consumed, or mismatched |
+| `CONFIRMATION_EXPIRED` | 5-minute timeout elapsed |
+| `CONFIRMATION_ALREADY_USED` | Replay attempt |
+| `TOO_MANY_PENDING` | >16 pending confirmations per session |
+
+## Security Properties
+
+| Property | Implementation |
+|----------|----------------|
+| **Agent cannot self-approve** | Approval requires external `approve()` call |
+| **Bound to exact action** | Token validated against session+tool+arguments |
+| **Single-use** | Status changes to `Consumed` after first use |
+| **Expiring** | 5-minute default timeout |
+| **Replay prevention** | `Consumed` status rejects second use |
+| **Cross-session isolation** | Token bound to `SessionId` |
+| **Cryptographic tokens** | `ConfirmationToken` is UUIDv4 from OS RNG |
+
+## Mock Adapter for Testing
+
+```rust
+let mock = MockConfirmationAdapter::new()
+    .with_auto_approve(true); // For automated tests
+
+// Or explicit decisions
+mock.set_decision(conf_id.clone(), true);
+assert!(mock.decide(&conf_id));
+```
+
+## Integration with igrisd
+
+The confirmation gate is integrated into `igrisd`'s request pipeline:
+
+1. Tool requires confirmation → gate creates `ConfirmationRequest`
+2. Returns `CONFIRMATION_REQUIRED` with `confirmation_id`
+3. External UI presents request, calls `approve()`/`deny()`
+4. Agent re-submits with `confirmation_token`
+5. Gate validates and consumes token
+6. Operation proceeds to provider
+
+## Code Reference
+
+- Confirmation gate: `core/igris-confirmation/src/lib.rs` — `ConfirmationGate`
+- Request/decision: `core/igris-confirmation/src/lib.rs` — `ConfirmationRequest`, `ConfirmationDecision`
+- Mock adapter: `core/igris-confirmation/src/lib.rs` — `MockConfirmationAdapter`
+- Error types: `core/igris-confirmation/src/error.rs` — `ConfirmationError`

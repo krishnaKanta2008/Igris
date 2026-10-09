@@ -1,0 +1,140 @@
+---
+title: Session Capabilities
+description: Session-scoped capability management for AI agent tool calling
+---
+
+# Session Capabilities
+
+Sessions are the primary authorization unit for AI agent interactions. Each session has an explicit identity and a limited set of authorized capabilities.
+
+## Session Lifecycle
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   CREATE    │────▶│   VALID     │────▶│  EXPIRED/   │────▶│   REMOVED   │
+│  SESSION    │     │  (ACTIVE)   │     │  REVOKED    │     │  (CLEANUP)  │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+                           │                    │
+                           ▼                    ▼
+                    ┌─────────────┐     ┌─────────────┐
+                    │  TOOL CALL  │     │  DENIED     │
+                    │  AUTHORIZED │     │  (ERROR)    │
+                    └─────────────┘     └─────────────┘
+```
+
+## Session Context
+
+Each session contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `SessionId` | Cryptographically random UUIDv4 |
+| `capabilities` | `CapabilitySet` | Set of granted capability strings |
+| `created_at` | `DateTime<Utc>` | Session creation timestamp |
+| `expires_at` | `DateTime<Utc>` | Automatic expiry timestamp |
+| `revoked_at` | `Option<DateTime<Utc>>` | Explicit revocation timestamp |
+| `metadata` | `serde_json::Value` | Optional session metadata |
+
+## Capability Set
+
+Capabilities are fine-grained permission strings:
+
+| Capability | Tools | Description |
+|------------|-------|-------------|
+| `system_info` | `system.info` | Read system information |
+| `filesystem_read` | `fs.list`, `fs.stat`, `fs.read` | Read filesystem |
+| `filesystem_write` | `fs.write`, `fs.delete` | Write/delete filesystem |
+| `process_read` | `process.list`, `process.stat`, `process.children` | Read process info |
+| `process_control` | `proc.signal` | Control processes (SIGTERM) |
+| `event_observation` | `events.watch`, `events.poll`, `events.unwatch` | Filesystem events |
+
+## Creating a Session
+
+```rust
+let registry = Arc::new(default_registry());
+let session_manager = Arc::new(SessionManager::new(registry));
+
+// Grant read-only capabilities
+let caps = CapabilitySet::from_iter(vec![
+    "filesystem_read".to_string(),
+    "process_read".to_string(),
+]);
+
+let session = session_manager.create_session(caps)?;
+// session.id is a cryptographically random UUIDv4
+```
+
+## Capability Validation
+
+On every tool invocation, `igrisd` validates the session's capabilities:
+
+```rust
+// In igrisd request handling pipeline
+let tool = tool_registry.get(&tool_id)?;
+session_manager.validate_capability(&session_id, &tool_id)?;
+```
+
+Validation fails with:
+- `SESSION_NOT_FOUND` — Session ID not found
+- `SESSION_EXPIRED` — `expires_at` has passed
+- `SESSION_REVOKED` — Session explicitly revoked
+- `MISSING_CAPABILITY` — Required capability not in session's set
+
+## Session Expiry
+
+Sessions expire automatically:
+
+```rust
+// Default 1 hour, configurable
+let manager = SessionManager::new(registry)
+    .with_default_duration(Duration::from_secs(3600));
+
+// Or very short for testing
+let test_manager = SessionManager::new(registry)
+    .with_default_duration(Duration::from_nanos(1));
+```
+
+Expiry is checked on every `get_valid_session()` call.
+
+## Session Revocation
+
+Explicit revocation by the trusted core:
+
+```rust
+session_manager.revoke_session(&session_id)?;
+```
+
+Revoked sessions are immediately invalid. `get_valid_session()` returns `SESSION_REVOKED`.
+
+## Session Isolation
+
+- **No cross-session capability use**: A session cannot use another session's capabilities
+- **Unique IDs**: Session IDs are cryptographically random (128-bit UUIDv4 from OS RNG)
+- **No token sharing**: Capabilities are not bearer tokens; they're validated server-side
+
+## Cleanup
+
+Expired and revoked sessions are cleaned up periodically:
+
+```rust
+let removed = session_manager.cleanup(); // Returns count of removed sessions
+```
+
+## Security Properties
+
+| Property | Implementation |
+|----------|----------------|
+| **Unguessable IDs** | `getrandom` / OS CSPRNG for UUIDv4 |
+| **No ambient authority** | Only explicitly granted capabilities |
+| **Least privilege** | Fine-grained capability strings |
+| **Automatic expiry** | TTL enforced on every validation |
+| **Explicit revocation** | `revoke_session()` invalidates immediately |
+| **No token leakage** | Capabilities never logged; only session IDs in audit |
+| **Session isolation** | Each session has independent capability set |
+
+## Code Reference
+
+- Session context: `core/igris-session/src/lib.rs` — `SessionContext`
+- Session manager: `core/igris-session/src/lib.rs` — `SessionManager`
+- Capability set: `core/igris-session/src/lib.rs` — `CapabilitySet`
+- Error types: `core/igris-session/src/error.rs` — `SessionError`

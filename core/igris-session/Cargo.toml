@@ -1,0 +1,27 @@
+[package]
+name = "igris-session"
+description = "Igris session and capability management for AI agent tool calling."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+
+[lib]
+name = "igris_session"
+path = "src/lib.rs"
+
+[dependencies]
+igris-proto.workspace = true
+igris-permd.workspace = true
+igris-tool-registry.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror = "1.0"
+uuid = { version = "1.0", features = ["v4", "serde", "fast-rng"] }
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+getrandom = "0.2"
+
+[dev-dependencies]
+igris-tool-registry.workspace = true
+serde_json.workspace = true

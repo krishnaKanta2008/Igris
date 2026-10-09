@@ -1,0 +1,191 @@
+---
+title: Tool Registry
+description: Structured tool definitions with explicit schemas and metadata
+---
+
+# Tool Registry
+
+The Igris tool registry is a centralized, immutable catalog of every tool an AI agent may invoke. Each tool has an explicit schema, metadata, and capability requirements.
+
+## Design Principles
+
+- **Explicit over implicit**: Every tool must be registered with full schema
+- **Immutable at runtime**: New tools require registry version bump and ADR
+- **Schema-first**: Input/output validation via JSON Schema
+- **Capability-bound**: Each tool declares its required capability
+- **Confirmation-aware**: Sensitive tools declare confirmation requirement
+
+## Tool Definition
+
+Each tool entry contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `ToolId` | Stable identifier (e.g., `fs.read`, `proc.signal`) |
+| `schema_version` | `ToolSchemaVersion` | Semantic version of the tool contract |
+| `description` | `string` | Human-readable purpose |
+| `input_schema` | `JSON Schema` | Parameter validation rules |
+| `output_schema` | `JSON Schema` | Result structure |
+| `required_capability` | `string` | Capability name (e.g., `filesystem_read`) |
+| `requires_confirmation` | `bool` | Whether user confirmation is required |
+| `timeout_ms` | `u64` | Maximum execution time |
+| `max_input_bytes` | `u64` | Maximum request payload size |
+| `max_output_bytes` | `u64` | Maximum response payload size |
+
+## Built-in Tools (Registry v1.0.0)
+
+### System Tools
+
+| Tool | Capability | Confirmation | Description |
+|------|------------|--------------|-------------|
+| `system.info` | `system_info` | No | Returns live kernel/system information |
+
+### Filesystem Tools
+
+| Tool | Capability | Confirmation | Description |
+|------|------------|--------------|-------------|
+| `fs.list` | `filesystem_read` | No | Lists directory entries within configured root |
+| `fs.stat` | `filesystem_read` | No | Returns metadata for a single filesystem entry |
+| `fs.read` | `filesystem_read` | No | Reads file contents as base64-encoded data |
+| `fs.write` | `filesystem_write` | **Yes** | Creates or replaces a regular file with base64 content |
+| `fs.delete` | `filesystem_write` | **Yes** | Deletes a regular file or symlink (never directories) |
+
+### Process Tools
+
+| Tool | Capability | Confirmation | Description |
+|------|------------|--------------|-------------|
+| `process.list` | `process_read` | No | Returns bounded, PID-sorted snapshot of visible processes |
+| `process.stat` | `process_read` | No | Returns metadata for a single process by PID |
+| `process.children` | `process_read` | No | Returns direct children of a process (not recursive) |
+| `proc.signal` | `process_control` | **Yes** | Sends SIGTERM (15) to a process |
+
+### Event Tools
+
+| Tool | Capability | Confirmation | Description |
+|------|------------|--------------|-------------|
+| `events.watch` | `event_observation` | No | Registers a filesystem event watch on a path |
+| `events.poll` | `event_observation` | No | Drains queued events from a watch |
+| `events.unwatch` | `event_observation` | No | Removes a filesystem event watch by ID |
+
+## Schema Examples
+
+### `fs.read` Input Schema
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Absolute path within IGRIS_FS_ROOT"
+    },
+    "max_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1048576,
+      "default": 65536,
+      "description": "Maximum bytes to read"
+    }
+  }
+}
+```
+
+### `fs.write` Input Schema
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "content_base64", "confirm"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Absolute path within IGRIS_FS_ROOT"
+    },
+    "content_base64": {
+      "type": "string",
+      "description": "Base64-encoded file content"
+    },
+    "max_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1048576,
+      "default": 65536,
+      "description": "Maximum bytes allowed"
+    },
+    "confirm": {
+      "type": "boolean",
+      "const": true,
+      "description": "Must be true to confirm write"
+    }
+  }
+}
+```
+
+### `proc.signal` Input Schema
+
+```json
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pid", "signal", "confirm"],
+  "properties": {
+    "pid": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4000000
+    },
+    "signal": {
+      "type": "integer",
+      "const": 15,
+      "description": "Only SIGTERM (15) is allowed"
+    },
+    "confirm": {
+      "type": "boolean",
+      "const": true,
+      "description": "Must be true to confirm signal delivery"
+    }
+  }
+}
+```
+
+## Validation Pipeline
+
+When a request arrives at `igrisd`:
+
+1. **Protocol validation** — version, ID, params shape, operation support
+2. **Tool registry lookup** — tool must exist in registry
+3. **Parameter validation** — against tool's input JSON Schema
+4. **Capability check** — session must have required capability
+5. **Confirmation check** — if required, valid token must be presented
+6. **Policy check** — `igris-permd` evaluates operation
+7. **Provider dispatch** — forward to sandboxed provider
+
+## Error Codes
+
+| Code | Meaning |
+|------|---------|
+| `TOOL_NOT_FOUND` | Operation not in registry |
+| `SCHEMA_VALIDATION_FAILED` | Parameters don't match input schema |
+| `MISSING_CAPABILITY` | Session lacks required capability |
+| `CONFIRMATION_REQUIRED` | Sensitive operation needs confirmation token |
+| `CONFIRMATION_INVALID` | Token missing, expired, already used, or mismatched |
+
+## Adding New Tools
+
+To add a new tool:
+
+1. Define tool in `igris-tool-registry/src/lib.rs` via `default_registry()`
+2. Increment `REGISTRY_VERSION`
+3. Write ADR documenting the tool and its security implications
+4. Update capability policy in `igris-permd` if new capability needed
+5. Update documentation
+
+## Code Reference
+
+- Registry: `core/igris-tool-registry/src/lib.rs`
+- Schema helpers: `core/igris-tool-registry/src/schema.rs`
+- Tool definitions: `core/igris-tool-registry/src/tool.rs`
+- Error types: `core/igris-tool-registry/src/error.rs`

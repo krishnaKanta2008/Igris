@@ -1,0 +1,155 @@
+---
+title: AI Agent Trust Boundaries
+description: Trust boundaries and security model for the Igris AI agent tool-calling system
+---
+
+# AI Agent Trust Boundaries
+
+This document describes the trust boundaries and security model for the Igris AI agent tool-calling system (Milestone 8).
+
+## Overview
+
+The Igris AI agent operates under a **zero-trust** model. The agent itself holds no ambient authority; every operation must be explicitly authorized, confirmed when sensitive, and audited.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           USER / AI AGENT                                   │
+│  (Untrusted - executes on behalf of user, may be compromised)              │
+└──────────────────────────────────┬──────────────────────────────────────────┘
+                                   │
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          IGRIS CORE (TRUSTED)                               │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────────────┐  │
+│  │   igrisctl       │  │   igris-permd    │  │    igrisd (router)       │  │
+│  │   (client)       │  │   (policy)       │  │  ┌────────────────────┐  │  │
+│  └──────────────────┘  └──────────────────┘  │  │ ProviderManager    │  │  │
+│                                               │  │  ┌──────────────┐  │  │  │
+│                                               │  │  │ fs provider  │  │  │  │
+│                                               │  │  │ process prov.│  │  │  │
+│                                               │  │  │ system prov. │  │  │  │
+│                                               │  │  │ events prov. │  │  │  │
+│                                               │  │  └──────────────┘  │  │  │
+│                                               │  └────────────────────┘  │  │
+│                                               └──────────────────────────┘  │
+└──────────────────────────────────┬──────────────────────────────────────────┘
+                                   │
+                    ┌──────────────┼──────────────┐
+                    ▼              ▼              ▼
+             ┌──────────┐   ┌──────────┐   ┌──────────┐
+             │fs-provider│   │proc-provider│  │sys-provider│
+             └──────────┘   └──────────┘   └──────────┘
+             (sandboxed: namespaces, cgroups, seccomp)
+```
+
+## Trust Boundary Definitions
+
+### 1. Agent ↔ igrisd (IPC Boundary)
+
+**The agent is untrusted.** All requests from the agent are treated as potentially malicious:
+
+- Every byte from the agent is validated before processing
+- Oversized requests are rejected before body parsing (64 KiB limit)
+- Protocol version, request ID, and operation name are validated
+- Parameters are validated against JSON schemas
+- No shell interpretation or command execution
+
+### 2. igrisd ↔ igris-permd (Policy Boundary)
+
+**igrisd never embeds policy.** Authorization decisions are delegated to `igris-permd`:
+
+- Default-deny policy: everything is denied unless explicitly allowed
+- Policy evaluation happens before any provider dispatch
+- Policy decisions are audited with correlation IDs
+- No "allow all" development mode exists
+
+### 3. igrisd ↔ Sandboxed Providers (Sandbox Boundary)
+
+**Providers are sandboxed.** Each provider runs in an isolated environment:
+
+- Linux namespaces (PID, mount, network, UTS, IPC)
+- cgroups v2 for memory, CPU, and PID limits
+- seccomp-bpf syscall filtering
+- Communication over Unix domain sockets
+- Providers cannot escape their sandbox
+
+### 4. Session Capability Boundary
+
+**Capabilities are the unit of authorization.** Sessions have explicit, limited capabilities:
+
+- Capabilities are granted at session creation (least privilege)
+- Capabilities cannot be escalated or transferred between sessions
+- Capabilities expire automatically and can be explicitly revoked
+- Cryptographically random session IDs (128-bit UUIDv4)
+- No timestamps, counters, or predictable values as tokens
+
+### 5. Confirmation Gate Boundary
+
+**Sensitive operations require human approval.** The agent cannot approve its own actions:
+
+- Confirmation bound to exact tool ID and validated arguments
+- Single-use, expiring confirmation tokens
+- Agent submits token with re-request; igrisd validates and consumes
+- Replay and cross-session attacks prevented
+
+## Security Properties
+
+| Property | Implementation |
+|----------|----------------|
+| **No ambient authority** | Agent only has session-scoped capabilities |
+| **Least privilege** | Fine-grained capabilities (filesystem_read, process_control, etc.) |
+| **Session isolation** | Separate capability sets per session; no cross-session use |
+| **Capability expiry** | Automatic expiry + explicit revocation |
+| **Human-in-the-loop** | Confirmation gate for destructive operations |
+| **Audit trail** | Correlation IDs link session→tool→policy→confirmation→provider→result |
+| **Untrusted provider output** | Provider responses treated as data, never as instructions |
+
+## Threat Model
+
+### Agent Compromise
+If the agent is compromised (malicious prompt, bug, supply chain attack):
+
+- Cannot bypass `igris-permd` — all requests go through policy evaluation
+- Cannot directly invoke providers — all traffic routes through `igrisd`
+- Cannot escalate capabilities — capabilities are validated per-request
+- Cannot approve its own confirmations — confirmation requires external decision
+
+### Provider Compromise
+If a sandboxed provider is compromised:
+
+- Cannot escape namespace/cgroup/seccomp boundaries
+- Output is treated as untrusted data, never as instructions
+- Other providers remain isolated
+
+### Replay Attacks
+- Confirmation tokens are single-use and bound to session+tool+arguments
+- Session IDs are cryptographically random
+- Expired/revoked sessions rejected immediately
+
+### Cross-Session Attacks
+- Sessions cannot use each other's capabilities
+- Session validation checks revocation and expiry on every request
+- Confirmation tokens include session ID binding
+
+## M8 vs M1-M7
+
+M8 adds new security layers **without weakening** existing M1-M7 guarantees:
+
+| Layer | M1-M7 | M8 Addition |
+|-------|-------|-------------|
+| Policy | ✓ default-deny | Capability validation per session |
+| Sandbox | ✓ namespaces/cgroups/seccomp | Provider output treated as untrusted |
+| Audit | ✓ request/decision/result | Correlation IDs across full pipeline |
+| IPC | ✓ versioned bounded protocol | Session ID, confirmation token fields |
+
+## Limitations
+
+- **Not production-grade**: Audit log is not tamper-proof (append-only file)
+- **No LLM integration**: M8 uses deterministic mock agent only
+- **Single-user**: No multi-user session isolation at OS level
+- **No network policies**: Providers run with network namespace but no egress control
+- **Confirmation UI**: No built-in UI; requires external integration
+
+## Next Steps
+
+See [ADR 0009](/adr/0009-agent-tool-calling-and-sandboxing) for the full design decision.
