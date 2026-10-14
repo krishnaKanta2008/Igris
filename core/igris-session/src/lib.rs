@@ -213,10 +213,12 @@ pub struct SessionContext {
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub metadata: serde_json::Value,
+    /// PID of the process that created this session (for process hierarchy validation).
+    pub owner_pid: u64,
 }
 
 impl SessionContext {
-    pub fn new(capabilities: CapabilitySet, duration: Duration) -> Self {
+    pub fn new(capabilities: CapabilitySet, duration: Duration, owner_pid: u64) -> Self {
         let now = Utc::now();
         Self {
             id: SessionId::new(),
@@ -226,6 +228,7 @@ impl SessionContext {
                 + chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::hours(1)),
             revoked_at: None,
             metadata: serde_json::Value::Null,
+            owner_pid,
         }
     }
 
@@ -292,7 +295,14 @@ impl SessionManager {
     }
 
     /// Create a new session with the given capabilities.
-    pub fn create_session(&self, capabilities: CapabilitySet) -> SessionResult<SessionContext> {
+    ///
+    /// The `owner_pid` must be provided by the caller (typically from authenticated peer credentials).
+    /// There is no default - callers must explicitly provide the authenticated peer PID.
+    pub fn create_session(
+        &self,
+        capabilities: CapabilitySet,
+        owner_pid: u64,
+    ) -> SessionResult<SessionContext> {
         // Validate that all capabilities are known
         for cap in capabilities.iter() {
             if !self.is_known_capability(cap) {
@@ -300,7 +310,7 @@ impl SessionManager {
             }
         }
 
-        let session = SessionContext::new(capabilities, self.default_duration);
+        let session = SessionContext::new(capabilities, self.default_duration, owner_pid);
         let id = session.id.clone();
 
         self.sessions.write().insert(id, session.clone());
@@ -391,6 +401,23 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Verify that the session is owned by the given PID.
+    /// Returns the session if valid and owned by the PID, otherwise an error.
+    pub fn verify_session_owner(
+        &self,
+        session_id: &SessionId,
+        owner_pid: u64,
+    ) -> SessionResult<SessionContext> {
+        let session = self.get_valid_session(session_id)?;
+        if session.owner_pid != owner_pid {
+            return Err(SessionError::SessionNotFound(format!(
+                "session {} not owned by PID {}",
+                session_id, owner_pid
+            )));
+        }
+        Ok(session)
+    }
+
     /// Get the tool registry.
     pub fn tool_registry(&self) -> &Arc<ToolRegistry> {
         &self.tool_registry
@@ -443,7 +470,8 @@ mod tests {
     #[test]
     fn session_context_lifecycle() {
         let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-        let session = SessionContext::new(caps, DEFAULT_SESSION_DURATION);
+        let session =
+            SessionContext::new(caps, DEFAULT_SESSION_DURATION, std::process::id() as u64);
 
         assert!(session.is_valid());
         assert!(!session.is_expired());
@@ -454,7 +482,8 @@ mod tests {
     #[test]
     fn session_revocation() {
         let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-        let mut session = SessionContext::new(caps, DEFAULT_SESSION_DURATION);
+        let mut session =
+            SessionContext::new(caps, DEFAULT_SESSION_DURATION, std::process::id() as u64);
 
         assert!(session.is_valid());
         session.revoke();
@@ -468,7 +497,9 @@ mod tests {
         let manager = SessionManager::new(registry);
 
         let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-        let session = manager.create_session(caps).unwrap();
+        let session = manager
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
 
         let retrieved = manager.get_session(&session.id).unwrap();
         assert_eq!(session.id, retrieved.id);
@@ -481,7 +512,7 @@ mod tests {
         let manager = SessionManager::new(registry);
 
         let caps = CapabilitySet::from_iter(vec!["unknown_capability".to_string()]);
-        let result = manager.create_session(caps);
+        let result = manager.create_session(caps, std::process::id() as u64);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),
@@ -495,7 +526,9 @@ mod tests {
         let manager = SessionManager::new(registry);
 
         let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-        let session = manager.create_session(caps).unwrap();
+        let session = manager
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
 
         // fs.write requires filesystem_write capability
         let tool_id = ToolId::new("fs.write");
@@ -513,7 +546,9 @@ mod tests {
         let manager = SessionManager::new(registry);
 
         let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-        let session = manager.create_session(caps).unwrap();
+        let session = manager
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
 
         // fs.read requires filesystem_read capability
         let tool_id = ToolId::new("fs.read");
@@ -527,7 +562,9 @@ mod tests {
         let manager = SessionManager::new(registry);
 
         let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-        let session = manager.create_session(caps).unwrap();
+        let session = manager
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
 
         manager.revoke_session(&session.id).unwrap();
 
@@ -542,7 +579,9 @@ mod tests {
         let manager = SessionManager::new(registry).with_default_duration(Duration::from_nanos(1));
 
         let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-        let session = manager.create_session(caps).unwrap();
+        let session = manager
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
 
         // Wait for expiration
         std::thread::sleep(Duration::from_millis(10));

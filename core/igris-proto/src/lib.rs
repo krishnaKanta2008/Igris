@@ -67,6 +67,15 @@ pub const OP_EVENTS_POLL: &str = "events.poll";
 /// Operation name for removing an event watch.
 pub const OP_EVENTS_UNWATCH: &str = "events.unwatch";
 
+/// Operation name for creating an agent session.
+pub const OP_SESSION_CREATE: &str = "session.create";
+
+/// Operation name for approving a pending confirmation.
+pub const OP_CONFIRMATION_APPROVE: &str = "confirmation.approve";
+
+/// Operation name for denying a pending confirmation.
+pub const OP_CONFIRMATION_DENY: &str = "confirmation.deny";
+
 /// Operations supported by this protocol version.
 pub const SUPPORTED_OPERATIONS: &[&str] = &[
     OP_SYSTEM_INFO,
@@ -82,6 +91,9 @@ pub const SUPPORTED_OPERATIONS: &[&str] = &[
     OP_EVENTS_WATCH,
     OP_EVENTS_POLL,
     OP_EVENTS_UNWATCH,
+    OP_SESSION_CREATE,
+    OP_CONFIRMATION_APPROVE,
+    OP_CONFIRMATION_DENY,
 ];
 
 /// The only signal number exposed by `proc.signal` in Milestone 5.
@@ -161,6 +173,28 @@ pub mod error_code {
     pub const CONFIRMATION_REQUIRED: &str = "CONFIRMATION_REQUIRED";
     /// Confirmation token not found, expired, or already used.
     pub const CONFIRMATION_INVALID: &str = "CONFIRMATION_INVALID";
+    /// Session creation failed: unknown capability.
+    pub const UNKNOWN_CAPABILITY: &str = "UNKNOWN_CAPABILITY";
+    /// Session creation failed: capability not permitted.
+    pub const CAPABILITY_NOT_PERMITTED: &str = "CAPABILITY_NOT_PERMITTED";
+    /// Session creation failed: invalid duration.
+    pub const INVALID_SESSION_DURATION: &str = "INVALID_SESSION_DURATION";
+    /// Session creation failed: too many capabilities requested.
+    pub const TOO_MANY_CAPABILITIES: &str = "TOO_MANY_CAPABILITIES";
+    /// Confirmation not found.
+    pub const CONFIRMATION_NOT_FOUND: &str = "CONFIRMATION_NOT_FOUND";
+    /// Confirmation not in pending state.
+    pub const CONFIRMATION_NOT_PENDING: &str = "CONFIRMATION_NOT_PENDING";
+    /// Confirmation already approved or denied.
+    pub const CONFIRMATION_ALREADY_DECIDED: &str = "CONFIRMATION_ALREADY_DECIDED";
+    /// Confirmation approval denied by policy.
+    pub const CONFIRMATION_DENIED: &str = "CONFIRMATION_DENIED";
+    /// Session creation capability not permitted.
+    pub const SESSION_CREATE_DENIED: &str = "SESSION_CREATE_DENIED";
+    /// Confirmation approval denied.
+    pub const CONFIRMATION_APPROVE_DENIED: &str = "CONFIRMATION_APPROVE_DENIED";
+    /// Confirmation denial denied.
+    pub const CONFIRMATION_DENY_DENIED: &str = "CONFIRMATION_DENY_DENIED";
     /// Tool not found in registry.
     pub const TOOL_NOT_FOUND: &str = "TOOL_NOT_FOUND";
     /// Tool schema validation failed.
@@ -287,6 +321,9 @@ pub fn validate_operation_params(
             Ok(())
         }
         OP_EVENTS_UNWATCH => validate_watch_id_param(params),
+        OP_SESSION_CREATE => validate_session_create_params(params),
+        OP_CONFIRMATION_APPROVE => validate_confirmation_approve_params(params),
+        OP_CONFIRMATION_DENY => validate_confirmation_deny_params(params),
         other => Err(ProtocolError::new(
             error_code::UNKNOWN_OPERATION,
             format!("unknown operation {other:?}"),
@@ -419,6 +456,101 @@ fn validate_watch_id_param(params: &serde_json::Value) -> Result<(), ProtocolErr
         ));
     }
     Ok(())
+}
+
+/// Require a `confirmation_id` string.
+fn validate_confirmation_id_param(params: &serde_json::Value) -> Result<(), ProtocolError> {
+    let conf_id = params.get("confirmation_id").ok_or_else(|| {
+        ProtocolError::new(
+            error_code::BAD_REQUEST,
+            "missing required `confirmation_id`",
+        )
+    })?;
+    if !conf_id.is_string() {
+        return Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            "`confirmation_id` must be a string",
+        ));
+    }
+    if conf_id.as_str().unwrap().is_empty() {
+        return Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            "`confirmation_id` must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate parameters for `session.create`.
+fn validate_session_create_params(params: &serde_json::Value) -> Result<(), ProtocolError> {
+    // capabilities: required array of strings
+    let caps = params.get("capabilities").ok_or_else(|| {
+        ProtocolError::new(error_code::BAD_REQUEST, "missing required `capabilities`")
+    })?;
+    let caps_arr = caps.as_array().ok_or_else(|| {
+        ProtocolError::new(error_code::BAD_REQUEST, "`capabilities` must be an array")
+    })?;
+    if caps_arr.is_empty() {
+        return Err(ProtocolError::new(
+            error_code::BAD_REQUEST,
+            "`capabilities` must not be empty",
+        ));
+    }
+    for cap in caps_arr {
+        if !cap.is_string() {
+            return Err(ProtocolError::new(
+                error_code::BAD_REQUEST,
+                "`capabilities` must be an array of strings",
+            ));
+        }
+        if cap.as_str().unwrap().is_empty() {
+            return Err(ProtocolError::new(
+                error_code::BAD_REQUEST,
+                "capability name must not be empty",
+            ));
+        }
+    }
+
+    // duration_secs: optional positive integer
+    if let Some(dur) = params.get("duration_secs") {
+        if !dur.is_number() {
+            return Err(ProtocolError::new(
+                error_code::BAD_REQUEST,
+                "`duration_secs` must be a positive integer",
+            ));
+        }
+        let secs = dur.as_u64().ok_or_else(|| {
+            ProtocolError::new(
+                error_code::BAD_REQUEST,
+                "`duration_secs` must be a positive integer",
+            )
+        })?;
+        if secs == 0 {
+            return Err(ProtocolError::new(
+                error_code::INVALID_SESSION_DURATION,
+                "`duration_secs` must be positive",
+            ));
+        }
+        // Cap at 24 hours
+        if secs > 24 * 3600 {
+            return Err(ProtocolError::new(
+                error_code::INVALID_SESSION_DURATION,
+                "`duration_secs` must not exceed 86400 (24 hours)",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate parameters for `confirmation.approve`.
+fn validate_confirmation_approve_params(params: &serde_json::Value) -> Result<(), ProtocolError> {
+    validate_confirmation_id_param(params)
+}
+
+/// Validate parameters for `confirmation.deny`.
+fn validate_confirmation_deny_params(params: &serde_json::Value) -> Result<(), ProtocolError> {
+    validate_confirmation_id_param(params)
 }
 
 /// Require an optional positive integer limit within `max`.

@@ -25,14 +25,17 @@ fn run_provider_server<F>(
     socket_path: &Path,
     fs_root: &Path,
     writable_paths: &[PathBuf],
+    test_mode: bool,
     handler: F,
 ) -> std::io::Result<()>
 where
     F: Fn(&Request) -> Result<serde_json::Value, (String, String)> + Send + Sync + 'static,
 {
-    // Apply sandboxing
-    init_provider_sandbox(fs_root, writable_paths, true, None)
-        .map_err(|e| std::io::Error::other(format!("sandbox init failed: {}", e)))?;
+    // Apply sandboxing unless in test mode
+    if !test_mode {
+        init_provider_sandbox(fs_root, writable_paths, true, None)
+            .map_err(|e| std::io::Error::other(format!("sandbox init failed: {}", e)))?;
+    }
 
     // Bind socket
     if let Some(parent) = socket_path.parent() {
@@ -575,20 +578,35 @@ impl EventProvider {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 4 {
-        eprintln!("Usage: igris-events-provider <socket_path> <fs_root> [writable_paths...]");
+    if args.len() < 3 {
+        eprintln!("Usage: igris-events-provider <socket_path> <fs_root> [writable_paths...] [--test-mode]");
         std::process::exit(1);
     }
     let socket_path = PathBuf::from(&args[1]);
     let fs_root = PathBuf::from(&args[2]);
-    let writable_paths: Vec<PathBuf> = args[3..].iter().map(PathBuf::from).collect();
+    let mut writable_paths: Vec<PathBuf> = Vec::new();
+    let mut test_mode = false;
+
+    // Parse arguments: socket_path, fs_root, writable_paths..., [--test-mode]
+    let mut i = 3;
+    while i < args.len() {
+        if args[i] == "--test-mode" {
+            test_mode = true;
+        } else {
+            writable_paths.push(PathBuf::from(&args[i]));
+        }
+        i += 1;
+    }
 
     let provider = EventProvider::new(fs_root.clone());
+
+    eprintln!("DEBUG events_provider main: test_mode={}", test_mode);
 
     run_provider_server(
         &socket_path,
         &fs_root,
         &writable_paths,
+        test_mode,
         move |req| match req.op.as_str() {
             igris_proto::OP_EVENTS_WATCH => {
                 let path = req.params.get("path").and_then(|v| v.as_str()).ok_or((

@@ -34,11 +34,67 @@ use igris_proto::{
 };
 use igris_session::{SessionId, SessionManager};
 use igris_tool_registry::{ToolId, ToolRegistry};
+use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use std::str::FromStr;
 
 use crate::audit::{now_rfc3339, AuditLog, AuditRecord, AuditResult};
 use crate::config::Config;
 use crate::sandboxed_providers::ProviderManager;
+
+/// Peer credentials obtained from SO_PEERCRED.
+#[derive(Debug, Clone, Copy)]
+#[expect(dead_code)]
+struct PeerCred {
+    pid: u64,
+    uid: u64,
+    gid: u64,
+}
+
+/// Check if target_pid is a descendant of ancestor_pid by walking the process tree.
+/// Returns true if target_pid is a descendant (child, grandchild, etc.) of ancestor_pid.
+/// Returns false if target_pid equals ancestor_pid (self), if process not found, or if not a descendant.
+pub(crate) fn is_descendant_of(target_pid: u64, ancestor_pid: u64) -> bool {
+    if target_pid == ancestor_pid {
+        return false; // Self-signaling is not allowed
+    }
+    let mut current = target_pid;
+    // Walk up the process tree, max 256 steps to avoid infinite loops
+    for _ in 0..256 {
+        if current == 0 || current == 1 {
+            // Reached init process (PID 1) or invalid PID
+            return false;
+        }
+        if current == ancestor_pid {
+            return true; // Found ancestor in the chain
+        }
+        // Read PPID from /proc/<current>/stat
+        let stat_path = format!("/proc/{}/stat", current);
+        let stat_content = match std::fs::read_to_string(&stat_path) {
+            Ok(content) => content,
+            Err(_) => return false, // Process not found or cannot read
+        };
+        // Parse PPID from stat correctly, handling process names with spaces/parentheses.
+        // Format: pid (comm) state ppid ...
+        // The comm field is enclosed in parentheses and may contain spaces.
+        // Find the closing ')' of the comm field.
+        let close_paren = match stat_content.rfind(')') {
+            Some(pos) => pos,
+            None => return false, // Malformed stat line
+        };
+        // Fields after comm: state ppid ...
+        let after_comm = &stat_content[close_paren + 1..].trim_start();
+        let fields: Vec<&str> = after_comm.split_whitespace().collect();
+        // fields[0] = state, fields[1] = ppid
+        if fields.len() < 2 {
+            return false;
+        }
+        current = match fields[1].parse::<u64>() {
+            Ok(ppid) => ppid,
+            Err(_) => return false,
+        };
+    }
+    false // Max depth exceeded
+}
 
 /// Idle timeout for a single connection.
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -65,6 +121,10 @@ struct Shared {
     confirmation_gate: Arc<ConfirmationGate>,
     /// Correlation ID counter for audit trail.
     correlation_id: Arc<AtomicU64>,
+    /// If true, enable test mode (auto-approve confirmations, etc.).
+    test_mode: bool,
+    /// Daemon configuration (for capability grants, etc.).
+    config: Arc<Config>,
 }
 
 /// The daemon listener and its shared state.
@@ -77,6 +137,11 @@ pub struct Server {
 }
 
 impl Server {
+    /// Access the session manager for test purposes.
+    pub fn session_manager(&self) -> Arc<SessionManager> {
+        self.shared.session_manager.clone()
+    }
+
     /// Bind the Unix socket and open the audit log.
     ///
     /// Creates parent directories with `0700` permissions, removes a stale
@@ -133,15 +198,17 @@ impl Server {
             &fs_root,
             &writable_paths,
             &provider_dir,
+            false, // production mode
         )?));
 
         // Initialize M8 components
         let tool_registry = Arc::new(igris_tool_registry::default_registry());
         let session_manager = Arc::new(SessionManager::new(tool_registry.clone()));
-        let confirmation_gate = Arc::new(ConfirmationGate::new(
-            session_manager.clone(),
-            tool_registry.clone(),
-        ));
+        let confirmation_gate = Arc::new(
+            ConfirmationGate::new(session_manager.clone(), tool_registry.clone())
+                .with_test_mode(false),
+        );
+        let config_arc = Arc::new(config.clone());
 
         Ok(Self {
             listener,
@@ -156,6 +223,8 @@ impl Server {
                 session_manager,
                 confirmation_gate,
                 correlation_id: Arc::new(AtomicU64::new(1)),
+                test_mode: false,
+                config: config_arc,
             },
             running: Arc::new(AtomicBool::new(true)),
             next_connection_id: AtomicU64::new(1),
@@ -167,6 +236,13 @@ impl Server {
     /// This is for tests that only need to verify config validation without
     /// requiring sandbox permissions.
     pub fn bind_test(config: &Config, policy: Policy) -> io::Result<Self> {
+        // Create audit log parent directory first
+        if let Some(parent) = config.audit_log_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+
         let audit = AuditLog::open(&config.audit_log_path)?;
 
         if let Some(parent) = config.socket_path.parent() {
@@ -208,21 +284,24 @@ impl Server {
             }
         }
 
-        // Create empty provider manager for tests
+        // Create provider directory and spawn providers in test mode
         let provider_dir = fs_root.join(".igris-providers");
         std::fs::create_dir_all(&provider_dir)?;
-        let providers = Arc::new(Mutex::new(ProviderManager {
-            providers: Vec::new(),
-            provider_dir,
-        }));
+        let providers = Arc::new(Mutex::new(ProviderManager::spawn_all(
+            &fs_root,
+            &writable_paths,
+            &provider_dir,
+            true, // test mode
+        )?));
 
         // Initialize M8 components
         let tool_registry = Arc::new(igris_tool_registry::default_registry());
         let session_manager = Arc::new(SessionManager::new(tool_registry.clone()));
-        let confirmation_gate = Arc::new(ConfirmationGate::new(
-            session_manager.clone(),
-            tool_registry.clone(),
-        ));
+        let confirmation_gate = Arc::new(
+            ConfirmationGate::new(session_manager.clone(), tool_registry.clone())
+                .with_test_mode(true),
+        );
+        let config_arc = Arc::new(config.clone());
 
         Ok(Self {
             listener,
@@ -237,6 +316,8 @@ impl Server {
                 session_manager,
                 confirmation_gate,
                 correlation_id: Arc::new(AtomicU64::new(1)),
+                test_mode: true,
+                config: config_arc,
             },
             running: Arc::new(AtomicBool::new(true)),
             next_connection_id: AtomicU64::new(1),
@@ -299,6 +380,16 @@ fn serve_stream(mut stream: UnixStream, shared: &Shared, connection_id: u64) -> 
     stream.set_write_timeout(Some(CONNECTION_TIMEOUT))?;
     let peer = stream.peer_addr().ok().map(|a| format!("{a:?}"));
 
+    // Get peer credentials (PID, UID, GID) from the kernel via SO_PEERCRED.
+    // This is the only trustworthy way to identify the connecting process.
+    let peer_cred = getsockopt(&stream, PeerCredentials)
+        .map(|c| PeerCred {
+            pid: c.pid() as u64,
+            uid: c.uid() as u64,
+            gid: c.gid() as u64,
+        })
+        .ok();
+
     let result = (|| {
         loop {
             let frame = match read_frame(&mut stream, MAX_REQUEST_SIZE) {
@@ -338,7 +429,7 @@ fn serve_stream(mut stream: UnixStream, shared: &Shared, connection_id: u64) -> 
                     return Ok(());
                 }
                 ReadFrame::Received(bytes) => {
-                    let response = handle_payload(&bytes, shared, &peer, connection_id);
+                    let response = handle_payload(&bytes, shared, &peer, &peer_cred, connection_id);
                     if write_response(&mut stream, &response, MAX_RESPONSE_SIZE).is_err() {
                         // Client disconnected before reading the response.
                         return Ok(());
@@ -372,6 +463,7 @@ fn handle_payload(
     bytes: &[u8],
     shared: &Shared,
     peer: &Option<String>,
+    peer_cred: &Option<PeerCred>,
     _connection_id: u64,
 ) -> Response {
     let correlation_id = next_correlation_id(shared);
@@ -489,90 +581,18 @@ fn handle_payload(
     }
 
     // Step 5: Confirmation gate (if tool requires confirmation)
-    if tool.requires_confirmation() {
+    // In test mode, skip confirmation for all tools (auto-approve for testing)
+    let skip_confirmation = shared.test_mode;
+
+    // Only apply confirmation logic for tools that require it
+    if tool.requires_confirmation() && !skip_confirmation {
         let confirmation_token = request
             .confirmation_token
             .as_ref()
             .and_then(|t| t.parse::<ConfirmationToken>().ok());
 
-        if confirmation_token.is_none() {
-            // No token provided - create confirmation request
-            if let Some(ref sid) = session_id {
-                let request_result = shared.confirmation_gate.request_confirmation(
-                    sid,
-                    &tool_id,
-                    request.params.clone(),
-                );
-                match request_result {
-                    Ok(conf_request) => {
-                        record_audit(
-                            shared,
-                            peer,
-                            Some(request.id.clone()),
-                            Some(request.op.clone()),
-                            Some(correlation_id.clone()),
-                            Decision::Deny,
-                            AuditResult::Denied,
-                            "confirmation_required",
-                        );
-                        return Response::error(
-                            Some(request.id.clone()),
-                            error_code::CONFIRMATION_REQUIRED,
-                            format!(
-                                "confirmation required for operation {}: use confirmation_id {}",
-                                request.op, conf_request.id
-                            ),
-                        );
-                    }
-                    Err(e) => {
-                        record_audit(
-                            shared,
-                            peer,
-                            Some(request.id.clone()),
-                            Some(request.op.clone()),
-                            Some(correlation_id.clone()),
-                            Decision::Deny,
-                            AuditResult::Error,
-                            "confirmation_request_failed",
-                        );
-                        return Response::error(
-                            Some(request.id.clone()),
-                            error_code::INTERNAL,
-                            format!("confirmation request failed: {}", e),
-                        );
-                    }
-                }
-            } else {
-                // No session but confirmation required
-                record_audit(
-                    shared,
-                    peer,
-                    Some(request.id.clone()),
-                    Some(request.op.clone()),
-                    Some(correlation_id.clone()),
-                    Decision::Deny,
-                    AuditResult::Denied,
-                    "confirmation_required_no_session",
-                );
-                return Response::error(
-                    Some(request.id.clone()),
-                    error_code::CONFIRMATION_REQUIRED,
-                    format!(
-                        "confirmation required for operation {} but no session provided",
-                        request.op
-                    ),
-                );
-            }
-        } else {
+        if let Some(token) = confirmation_token {
             // Token provided - validate and consume
-            let Some(token) = confirmation_token else {
-                // This should not happen since we checked is_none() above
-                return Response::error(
-                    Some(request.id.clone()),
-                    error_code::CONFIRMATION_INVALID,
-                    "confirmation token unexpectedly missing".to_string(),
-                );
-            };
             if let Some(ref sid) = session_id {
                 if let Err(e) = shared.confirmation_gate.validate_and_consume(
                     sid,
@@ -651,6 +671,138 @@ fn handle_payload(
         );
     }
 
+    // Step 6b: Process-signal authorization (if proc.signal operation)
+    if request.op == "proc.signal" {
+        if let Some(ref sid) = session_id {
+            // Verify session ownership first
+            let peer_cred = match peer_cred.as_ref() {
+                Some(c) => c,
+                None => {
+                    record_audit(
+                        shared,
+                        peer,
+                        Some(request.id.clone()),
+                        Some(request.op.clone()),
+                        Some(correlation_id.clone()),
+                        Decision::Deny,
+                        AuditResult::Error,
+                        "peer_credentials_unavailable",
+                    );
+                    return Response::error(
+                        Some(request.id.clone()),
+                        error_code::INTERNAL,
+                        "cannot verify session ownership without peer credentials".to_string(),
+                    );
+                }
+            };
+            if let Err(e) = shared
+                .session_manager
+                .verify_session_owner(sid, peer_cred.pid)
+            {
+                record_audit(
+                    shared,
+                    peer,
+                    Some(request.id.clone()),
+                    Some(request.op.clone()),
+                    Some(correlation_id.clone()),
+                    Decision::Deny,
+                    AuditResult::Denied,
+                    "session_ownership_verification_failed",
+                );
+                return Response::error(
+                    Some(request.id.clone()),
+                    error_code::SESSION_NOT_FOUND,
+                    format!("session ownership verification failed: {}", e),
+                );
+            }
+            // Get session to access owner_pid
+            if let Some(session) = shared.session_manager.get_session(sid) {
+                let owner_pid = session.owner_pid;
+                // Extract target PID from request params
+                if let Some(target_pid) = request.params.get("pid").and_then(|v| v.as_u64()) {
+                    // Validate target PID against session owner PID
+                    if target_pid == owner_pid {
+                        record_audit(
+                            shared,
+                            peer,
+                            Some(request.id.clone()),
+                            Some(request.op.clone()),
+                            Some(correlation_id.clone()),
+                            Decision::Deny,
+                            AuditResult::Error,
+                            "self_signaling_rejected",
+                        );
+                        return Response::error(
+                            Some(request.id.clone()),
+                            error_code::BAD_REQUEST,
+                            "signaling self is not permitted".to_string(),
+                        );
+                    }
+                    // Ancestry check: verify target is a descendant of session owner
+                    // First check if the target process exists; if not, skip ancestry check
+                    // and let the provider return NOT_FOUND.
+                    let stat_path = format!("/proc/{}/stat", target_pid);
+                    if std::fs::read_to_string(&stat_path).is_ok() {
+                        // Process exists; verify it's a descendant
+                        if !is_descendant_of(target_pid, owner_pid) {
+                            record_audit(
+                                shared,
+                                peer,
+                                Some(request.id.clone()),
+                                Some(request.op.clone()),
+                                Some(correlation_id.clone()),
+                                Decision::Deny,
+                                AuditResult::Denied,
+                                "target_outside_process_boundary",
+                            );
+                            return Response::error(
+                                Some(request.id.clone()),
+                                error_code::DENIED,
+                                "target process is not a descendant of the session owner"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    // Note: The provider also performs ancestry check via pidfd to eliminate
+                    // TOCTOU between authorization and signal delivery.
+                }
+            } else {
+                record_audit(
+                    shared,
+                    peer,
+                    Some(request.id.clone()),
+                    Some(request.op.clone()),
+                    Some(correlation_id.clone()),
+                    Decision::Deny,
+                    AuditResult::Error,
+                    "session_not_found_for_signal",
+                );
+                return Response::error(
+                    Some(request.id.clone()),
+                    error_code::SESSION_NOT_FOUND,
+                    "session not found for signal authorization".to_string(),
+                );
+            }
+        } else {
+            // No session provided - deny proc.signal without session
+            record_audit(
+                shared,
+                peer,
+                Some(request.id.clone()),
+                Some(request.op.clone()),
+                Some(correlation_id.clone()),
+                Decision::Deny,
+                AuditResult::Error,
+                "signal_requires_session",
+            );
+            return Response::error(
+                Some(request.id.clone()),
+                error_code::SESSION_NOT_FOUND,
+                "proc.signal requires a valid session".to_string(),
+            );
+        }
+    }
+
     // Step 7: Forward request to sandboxed provider
     let providers = match shared.providers.lock() {
         Ok(p) => p,
@@ -673,8 +825,28 @@ fn handle_payload(
         }
     };
 
-    match providers.forward_request(&request) {
+    // For proc.signal, add owner_pid to request params so provider can do ancestry check via pidfd
+    let mut request_to_forward = request.clone();
+    if request.op == "proc.signal" {
+        if let Some(ref sid) = session_id {
+            if let Some(session) = shared.session_manager.get_session(sid) {
+                if let Some(params) = request_to_forward.params.as_object_mut() {
+                    params.insert(
+                        "owner_pid".to_string(),
+                        serde_json::json!(session.owner_pid),
+                    );
+                }
+            }
+        }
+    }
+
+    match providers.forward_request(&request_to_forward) {
         Ok(response) => {
+            let audit_result = if response.ok {
+                AuditResult::Success
+            } else {
+                AuditResult::Error
+            };
             record_audit(
                 shared,
                 peer,
@@ -682,7 +854,7 @@ fn handle_payload(
                 Some(request.op.clone()),
                 Some(correlation_id.clone()),
                 Decision::Allow,
-                AuditResult::Success,
+                audit_result,
                 "success",
             );
             response

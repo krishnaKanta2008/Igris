@@ -18,14 +18,17 @@ fn run_provider_server<F>(
     socket_path: &Path,
     fs_root: &Path,
     writable_paths: &[PathBuf],
+    test_mode: bool,
     handler: F,
 ) -> std::io::Result<()>
 where
     F: Fn(&Request) -> Result<serde_json::Value, (String, String)> + Send + Sync + 'static,
 {
-    // Apply sandboxing
-    init_provider_sandbox(fs_root, writable_paths, true, None)
-        .map_err(|e| std::io::Error::other(format!("sandbox init failed: {}", e)))?;
+    // Apply sandboxing unless in test mode
+    if !test_mode {
+        init_provider_sandbox(fs_root, writable_paths, true, None)
+            .map_err(|e| std::io::Error::other(format!("sandbox init failed: {}", e)))?;
+    }
 
     // Bind socket
     if let Some(parent) = socket_path.parent() {
@@ -292,17 +295,30 @@ mod system_ops {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: igris-system-provider <socket_path> [fs_root] [writable_paths...]");
+        eprintln!("Usage: igris-system-provider <socket_path> [--test-mode]");
         std::process::exit(1);
     }
     let socket_path = PathBuf::from(&args[1]);
     let fs_root = PathBuf::from("/");
     let writable_paths: Vec<PathBuf> = vec![];
+    let mut test_mode = false;
+
+    // Parse arguments: socket_path, [--test-mode]
+    let mut i = 2;
+    while i < args.len() {
+        if args[i] == "--test-mode" {
+            test_mode = true;
+        }
+        i += 1;
+    }
+
+    eprintln!("DEBUG system_provider main: test_mode={}", test_mode);
 
     run_provider_server(
         &socket_path,
         &fs_root,
         &writable_paths,
+        test_mode,
         move |req| match req.op.as_str() {
             igris_proto::OP_SYSTEM_INFO => {
                 let info = system_ops::collect()

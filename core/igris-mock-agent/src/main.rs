@@ -168,7 +168,7 @@ fn run_scenario(
         Scenario::ReadOnly => {
             // 1. Permitted read-only operation succeeds
             let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-            let session = session_manager.create_session(caps)?;
+            let session = session_manager.create_session(caps, std::process::id() as u64)?;
 
             let tool = tool_registry
                 .get(&ToolId::new("fs.read"))
@@ -188,7 +188,7 @@ fn run_scenario(
         Scenario::UnknownTool => {
             // 2. Unknown tool is rejected
             let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-            let session = session_manager.create_session(caps)?;
+            let session = session_manager.create_session(caps, std::process::id() as u64)?;
 
             // Unknown tool should not be in registry
             assert!(tool_registry.get(&ToolId::new("unknown.tool")).is_none());
@@ -202,7 +202,7 @@ fn run_scenario(
         Scenario::InvalidArgs => {
             // 3. Invalid arguments are rejected
             let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-            let session = session_manager.create_session(caps)?;
+            let session = session_manager.create_session(caps, std::process::id() as u64)?;
 
             // Build request with missing required 'path' parameter
             let request = Request {
@@ -223,7 +223,7 @@ fn run_scenario(
         Scenario::MissingCapability => {
             // 4. Missing capability is denied
             let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-            let session = session_manager.create_session(caps)?;
+            let session = session_manager.create_session(caps, std::process::id() as u64)?;
 
             // fs.write requires filesystem_write capability
             let result = session_manager.validate_capability(&session.id, &ToolId::new("fs.write"));
@@ -237,7 +237,7 @@ fn run_scenario(
         Scenario::ExpiredCapability => {
             // 5. Expired or revoked capability is denied
             let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-            let session = session_manager.create_session(caps)?;
+            let session = session_manager.create_session(caps, std::process::id() as u64)?;
 
             // Test revocation - use session_manager.revoke_session
             session_manager.revoke_session(&session.id)?;
@@ -249,7 +249,7 @@ fn run_scenario(
             let expired_manager = SessionManager::new(tool_registry.clone())
                 .with_default_duration(Duration::from_nanos(1));
             let caps2 = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-            let session2 = expired_manager.create_session(caps2)?;
+            let session2 = expired_manager.create_session(caps2, std::process::id() as u64)?;
             std::thread::sleep(Duration::from_millis(10));
             let result2 = expired_manager.get_valid_session(&session2.id);
             assert!(result2.is_err(), "Expired session should be rejected");
@@ -259,8 +259,9 @@ fn run_scenario(
         Scenario::CrossSession => {
             // 6. Cross-session capability use is denied
             let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-            let session1 = session_manager.create_session(caps.clone())?;
-            let session2 = session_manager.create_session(caps)?;
+            let session1 =
+                session_manager.create_session(caps.clone(), std::process::id() as u64)?;
+            let session2 = session_manager.create_session(caps, std::process::id() as u64)?;
 
             // session1's capabilities should not be usable by session2
             // (They have different IDs, so we test by checking isolation)
@@ -288,7 +289,7 @@ fn run_scenario(
         Scenario::NoConfirmation => {
             // 7. Sensitive operation without confirmation is denied
             let caps = CapabilitySet::from_iter(vec!["filesystem_write".to_string()]);
-            let session = session_manager.create_session(caps)?;
+            let session = session_manager.create_session(caps, std::process::id() as u64)?;
 
             // fs.write requires confirmation
             let tool = tool_registry
@@ -328,7 +329,7 @@ fn run_scenario(
         Scenario::DeniedConfirmation => {
             // 8. Denied confirmation never executes
             let caps = CapabilitySet::from_iter(vec!["filesystem_write".to_string()]);
-            let session = session_manager.create_session(caps)?;
+            let session = session_manager.create_session(caps, std::process::id() as u64)?;
 
             let tool_id = ToolId::new("fs.write");
             let args = serde_json::json!({
@@ -353,7 +354,7 @@ fn run_scenario(
         Scenario::AuthorizedConfirmation => {
             // 9. Authorized confirmation follows lifecycle
             let caps = CapabilitySet::from_iter(vec!["filesystem_write".to_string()]);
-            let session = session_manager.create_session(caps)?;
+            let session = session_manager.create_session(caps, std::process::id() as u64)?;
 
             let tool_id = ToolId::new("fs.write");
             let args = serde_json::json!({
@@ -395,7 +396,7 @@ fn run_scenario(
         Scenario::ReplayedConfirmation => {
             // 10. Replayed confirmation is rejected
             let caps = CapabilitySet::from_iter(vec!["filesystem_write".to_string()]);
-            let session = session_manager.create_session(caps)?;
+            let session = session_manager.create_session(caps, std::process::id() as u64)?;
 
             let tool_id = ToolId::new("fs.write");
             let args = serde_json::json!({
@@ -432,7 +433,7 @@ fn run_scenario(
             // The server generates correlation IDs for each request
             // We verify the structure supports it
             let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-            let _session = session_manager.create_session(caps)?;
+            let _session = session_manager.create_session(caps, std::process::id() as u64)?;
 
             let correlation_id = format!("cid-{:016x}", 42);
             assert!(!correlation_id.is_empty());
@@ -442,7 +443,7 @@ fn run_scenario(
         Scenario::UntrustedOutput => {
             // 13. Malicious-looking output treated as data
             let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-            let _session = session_manager.create_session(caps)?;
+            let _session = session_manager.create_session(caps, std::process::id() as u64)?;
 
             // Simulate provider returning suspicious content
             let suspicious_outputs = vec![

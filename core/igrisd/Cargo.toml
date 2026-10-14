@@ -26,6 +26,7 @@ serde_json.workspace = true
 libc = "0.2"
 inotify = "0.10"
 uuid = { version = "1.0", features = ["v4", "serde", "fast-rng"] }
+nix.workspace = true
 
 [dev-dependencies]
 igris-proto.workspace = true

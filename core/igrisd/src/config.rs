@@ -3,19 +3,27 @@
 //! Paths are configurable through environment variables so the daemon can be
 //! tested in isolation without touching the user's real socket or audit log:
 //!
-//! - `IGRIS_SOCKET_PATH`    — Unix domain socket to listen on.
-//! - `IGRIS_AUDIT_LOG`      — append-only audit log file.
-//! - `IGRIS_FS_ROOT`        — canonical root for filesystem tools.
-//! - `IGRIS_WRITABLE_PATHS` — colon-separated paths permitted for writes/deletes.
-//! - `IGRIS_PROCESS_CONTROL` — when set to a truthy value, enables `proc.signal`.
-//! - `IGRIS_EVENTS` — when set to a truthy value, enables event observation (`events.*`).
+//! - `IGRIS_SOCKET_PATH`           — Unix domain socket to listen on.
+//! - `IGRIS_AUDIT_LOG`             — append-only audit log file.
+//! - `IGRIS_FS_ROOT`               — canonical root for filesystem tools.
+//! - `IGRIS_WRITABLE_PATHS`        — colon-separated paths permitted for writes/deletes.
+//! - `IGRIS_PROCESS_CONTROL`       — when set to a truthy value, enables `proc.signal`.
+//! - `IGRIS_EVENTS`                — when set to a truthy value, enables event observation (`events.*`).
+//! - `IGRIS_AGENT_RUNTIME`         — when set to a truthy value, enables agent runtime operations (`session.create`, `confirmation.approve`, `confirmation.deny`).
+//! - `IGRIS_CAPABILITY_GRANTS`     — JSON mapping of UIDs to allowed capabilities (e.g., `{"1000":["filesystem_read","process_control"]}`).
 //!
 //! The writable path list defaults to empty. An empty list means filesystem
 //! writes and deletes remain unavailable.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use igris_proto::{default_audit_log_path, default_fs_root, default_socket_path};
+
+/// Mapping of UIDs to allowed capabilities for session creation.
+/// Used to authorize capability grants during `session.create`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CapabilityGrants(pub BTreeMap<u32, Vec<String>>);
 
 /// Effective daemon configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +43,10 @@ pub struct Config {
     /// by themselves; the daemon will enforce containment before dispatch.
     pub writable_paths: Vec<PathBuf>,
 
+    /// Per-UID capability grants for `session.create` authorization.
+    /// Empty by default (fail-closed: no capabilities can be granted).
+    pub capability_grants: CapabilityGrants,
+
     /// When `true`, process control operations (e.g. `proc.signal`) are
     /// permitted by policy. Defaults to `false` (default-deny).
     pub process_control_enabled: bool,
@@ -42,6 +54,11 @@ pub struct Config {
     /// When `true`, event observation operations (e.g. `events.watch`) are
     /// permitted by policy. Defaults to `false` (default-deny).
     pub events_enabled: bool,
+
+    /// When `true`, agent runtime operations (`session.create`,
+    /// `confirmation.approve`, `confirmation.deny`) are permitted by policy.
+    /// Defaults to `false` (default-deny).
+    pub agent_runtime_enabled: bool,
 }
 
 impl Config {
@@ -71,6 +88,14 @@ impl Config {
                 })
                 .unwrap_or_default(),
 
+            capability_grants: std::env::var_os("IGRIS_CAPABILITY_GRANTS")
+                .and_then(|value| {
+                    serde_json::from_str::<BTreeMap<u32, Vec<String>>>(&value.to_string_lossy())
+                        .map(CapabilityGrants)
+                        .ok()
+                })
+                .unwrap_or_default(),
+
             process_control_enabled: std::env::var_os("IGRIS_PROCESS_CONTROL")
                 .map(|v| {
                     let s = v.to_string_lossy();
@@ -79,6 +104,13 @@ impl Config {
                 .unwrap_or(false),
 
             events_enabled: std::env::var_os("IGRIS_EVENTS")
+                .map(|v| {
+                    let s = v.to_string_lossy();
+                    s != "0" && s != "false"
+                })
+                .unwrap_or(false),
+
+            agent_runtime_enabled: std::env::var_os("IGRIS_AGENT_RUNTIME")
                 .map(|v| {
                     let s = v.to_string_lossy();
                     s != "0" && s != "false"
@@ -96,8 +128,10 @@ impl Config {
             audit_log_path: audit_log_path.into(),
             fs_root: default_fs_root(),
             writable_paths: Vec::new(),
+            capability_grants: CapabilityGrants::default(),
             process_control_enabled: false,
             events_enabled: false,
+            agent_runtime_enabled: false,
         }
     }
 
@@ -115,8 +149,10 @@ impl Config {
             audit_log_path: audit_log_path.into(),
             fs_root: fs_root.into(),
             writable_paths: Vec::new(),
+            capability_grants: CapabilityGrants::default(),
             process_control_enabled: false,
             events_enabled: false,
+            agent_runtime_enabled: false,
         }
     }
 
@@ -132,8 +168,10 @@ impl Config {
             audit_log_path: audit_log_path.into(),
             fs_root: fs_root.into(),
             writable_paths: writable_paths.into_iter().map(Into::into).collect(),
+            capability_grants: CapabilityGrants::default(),
             process_control_enabled: false,
             events_enabled: false,
+            agent_runtime_enabled: false,
         }
     }
 }

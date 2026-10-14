@@ -612,6 +612,40 @@ pub fn default_registry() -> ToolRegistry {
         max_output_bytes: 1024,
     }));
 
+    // session.create
+    let _ = registry.register(Tool::new(ToolParams {
+        id: ToolId::new("session.create"),
+        schema_version: ToolSchemaVersion::new("1.0.0"),
+        description: "Creates a new agent session with the specified capabilities. The session is bound to the authenticated peer identity.".to_string(),
+        schema: ToolSchema::new(
+            InputSchema(helpers::object_with_properties_and_required(
+                {
+                    let mut props = BTreeMap::new();
+                    props.insert(
+                        "capabilities".to_string(),
+                        helpers::array(helpers::string()),
+                    );
+                    props
+                },
+                vec!["capabilities".to_string()],
+            )),
+            OutputSchema(helpers::object_with_properties_and_required(
+                {
+                    let mut props = BTreeMap::new();
+                    props.insert("session_id".to_string(), helpers::string());
+                    props.insert("expires_at".to_string(), helpers::string());
+                    props
+                },
+                vec!["session_id".to_string(), "expires_at".to_string()],
+            )),
+        ),
+        required_capability: "".to_string(), // No capability required - this is how you get capabilities
+        requires_confirmation: false,
+        timeout_ms: 5000,
+        max_input_bytes: 0,
+        max_output_bytes: 1024,
+    }));
+
     registry
 }
 
@@ -635,7 +669,8 @@ mod tests {
         assert!(registry.get_str("events.watch").is_some());
         assert!(registry.get_str("events.poll").is_some());
         assert!(registry.get_str("events.unwatch").is_some());
-        assert_eq!(registry.tools().count(), 13);
+        assert!(registry.get_str("session.create").is_some());
+        assert_eq!(registry.tools().count(), 14);
     }
 
     #[test]

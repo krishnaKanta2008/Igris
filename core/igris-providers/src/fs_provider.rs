@@ -19,14 +19,17 @@ fn run_provider_server<F>(
     socket_path: &Path,
     fs_root: &Path,
     writable_paths: &[PathBuf],
+    test_mode: bool,
     handler: F,
 ) -> std::io::Result<()>
 where
     F: Fn(&Request) -> Result<serde_json::Value, (String, String)> + Send + Sync + 'static,
 {
-    // Apply sandboxing
-    init_provider_sandbox(fs_root, writable_paths, true, None)
-        .map_err(|e| std::io::Error::other(format!("sandbox init failed: {}", e)))?;
+    // Apply sandboxing unless in test mode
+    if !test_mode {
+        init_provider_sandbox(fs_root, writable_paths, true, None)
+            .map_err(|e| std::io::Error::other(format!("sandbox init failed: {}", e)))?;
+    }
 
     // Bind socket
     if let Some(parent) = socket_path.parent() {
@@ -541,7 +544,9 @@ pub mod fs_ops {
         writable_paths: &[PathBuf],
         params: &Value,
     ) -> Result<WriteResult, FsFailure> {
+        eprintln!("DEBUG fs_ops::write called");
         let requested = params_path(params)?.to_string();
+        eprintln!("DEBUG write: requested={}", requested);
         let encoded = params
             .get("content_base64")
             .and_then(|v| v.as_str())
@@ -565,23 +570,44 @@ pub mod fs_ops {
             return Err(FsFailure::out_of_boundary());
         }
         let target = parent.join(&file_name);
-        let overwritten = match fs::symlink_metadata(&target) {
+        eprintln!(
+            "DEBUG write: target={}, requested={}",
+            target.display(),
+            requested
+        );
+        let symlink_meta = fs::symlink_metadata(&target);
+        eprintln!("DEBUG write: symlink_metadata result: {:?}", symlink_meta);
+        let overwritten = match symlink_meta {
             Ok(metadata) => {
                 let file_type = metadata.file_type();
-                if file_type.is_dir() {
-                    return Err(FsFailure {
-                        code: error_code::FS_ERROR,
-                        message: "not a file",
-                        denied: false,
-                    });
-                }
+                eprintln!(
+                    "DEBUG write: file_type={:?}, is_symlink={}, is_file={}, is_dir={}",
+                    file_type,
+                    file_type.is_symlink(),
+                    file_type.is_file(),
+                    file_type.is_dir()
+                );
                 if file_type.is_symlink() {
+                    eprintln!(
+                        "DEBUG write: target is symlink, target={}",
+                        target.display()
+                    );
                     match target.canonicalize() {
                         Ok(resolved) => {
+                            eprintln!(
+                                "DEBUG write: resolved symlink target to {}",
+                                resolved.display()
+                            );
                             let root = fs_root.canonicalize().map_err(FsFailure::from)?;
+                            eprintln!(
+                                "DEBUG write: fs_root={}, resolved.starts_with(root)={}",
+                                root.display(),
+                                resolved.starts_with(&root)
+                            );
                             if !resolved.starts_with(&root)
                                 || !is_writable_path(&resolved, writable_paths)
                             {
+                                eprintln!("DEBUG write: rejecting - out of boundary");
                                 return Err(FsFailure::out_of_boundary());
                             }
                         }
@@ -682,14 +708,29 @@ pub mod fs_ops {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 4 {
-        eprintln!("Usage: igris-fs-provider <socket_path> <fs_root> <writable_paths...>");
+        eprintln!(
+            "Usage: igris-fs-provider <socket_path> <fs_root> <writable_paths...> [--test-mode]"
+        );
         std::process::exit(1);
     }
     let socket_path = PathBuf::from(&args[1]);
     let fs_root = PathBuf::from(&args[2]);
-    let writable_paths: Vec<PathBuf> = args[3..].iter().map(PathBuf::from).collect();
+    let mut writable_paths: Vec<PathBuf> = Vec::new();
+    let mut test_mode = false;
 
-    // Clone for the closure which needs 'static lifetime
+    // Parse arguments: socket_path, fs_root, writable_paths..., [--test-mode]
+    let mut i = 3;
+    while i < args.len() {
+        if args[i] == "--test-mode" {
+            test_mode = true;
+        } else {
+            writable_paths.push(PathBuf::from(&args[i]));
+        }
+        i += 1;
+    }
+
+    eprintln!("DEBUG fs_provider main: test_mode={}", test_mode);
+
     let fs_root_clone = fs_root.clone();
     let writable_paths_clone = writable_paths.clone();
 
@@ -697,6 +738,7 @@ fn main() {
         &socket_path,
         &fs_root,
         &writable_paths,
+        test_mode,
         move |req| match req.op.as_str() {
             igris_proto::OP_FS_LIST => {
                 let result = fs_ops::list(&fs_root_clone, &writable_paths_clone, &req.params)

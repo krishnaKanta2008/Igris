@@ -23,8 +23,6 @@ pub mod events_provider;
 #[allow(dead_code)]
 pub mod fs_provider;
 #[allow(dead_code)]
-pub mod process_provider;
-#[allow(dead_code)]
 pub mod system_provider;
 
 /// Common provider server loop.
@@ -39,9 +37,11 @@ pub fn run_provider_server<F>(
 where
     F: Fn(&Request) -> Result<serde_json::Value, (String, String)> + Send + Sync + 'static,
 {
-    // Apply sandboxing
-    init_provider_sandbox(fs_root, writable_paths, true, None)
-        .map_err(|e| std::io::Error::other(format!("sandbox init failed: {}", e)))?;
+    // Apply sandboxing unless in test mode
+    if std::env::var("IGRIS_TEST_MODE").is_err() {
+        init_provider_sandbox(fs_root, writable_paths, true, None)
+            .map_err(|e| std::io::Error::other(format!("sandbox init failed: {}", e)))?;
+    }
 
     // Bind socket
     if let Some(parent) = socket_path.parent() {

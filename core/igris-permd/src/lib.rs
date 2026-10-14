@@ -136,6 +136,29 @@ impl Policy {
         policy
     }
 
+    /// The policy in force for Milestone 7 (Agent Runtime).
+    ///
+    /// Session and confirmation management operations are granted only when
+    /// the daemon has explicitly configured agent runtime support.
+    /// These operations are not granted by default to preserve default-deny.
+    pub fn milestone_seven(
+        writes_enabled: bool,
+        process_control_enabled: bool,
+        events_enabled: bool,
+        agent_runtime_enabled: bool,
+    ) -> Self {
+        let mut policy =
+            Self::milestone_six(writes_enabled, process_control_enabled, events_enabled);
+
+        if agent_runtime_enabled {
+            policy.allow(igris_proto::OP_SESSION_CREATE);
+            policy.allow(igris_proto::OP_CONFIRMATION_APPROVE);
+            policy.allow(igris_proto::OP_CONFIRMATION_DENY);
+        }
+
+        policy
+    }
+
     /// Allow an operation explicitly. Returns `true` if it was newly added.
     pub fn allow(&mut self, op: impl Into<String>) -> bool {
         self.allowed.insert(op.into())

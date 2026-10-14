@@ -35,6 +35,8 @@ pub struct ProviderConfig {
     pub cpu_period: Option<u64>,
     pub pids_max: Option<u64>,
     pub enable_network_namespace: bool,
+    pub enable_pid_namespace: bool,
+    pub test_mode: bool,
 }
 
 /// A handle to a running sandboxed provider.
@@ -102,6 +104,7 @@ impl ProviderManager {
         fs_root: &Path,
         writable_paths: &[PathBuf],
         provider_dir: &Path,
+        test_mode: bool,
     ) -> io::Result<Self> {
         std::fs::create_dir_all(provider_dir)?;
 
@@ -120,8 +123,13 @@ impl ProviderManager {
             cpu_period: Some(100000),
             pids_max: Some(32),
             enable_network_namespace: true,
+            enable_pid_namespace: true,
+            test_mode,
         })?;
         providers.push(fs_provider);
+        if test_mode {
+            Self::wait_for_provider(&fs_socket)?;
+        }
 
         // Spawn process provider
         let process_socket = provider_dir.join("igris-process.sock");
@@ -136,8 +144,13 @@ impl ProviderManager {
             cpu_period: Some(100000),
             pids_max: Some(16),
             enable_network_namespace: true,
+            enable_pid_namespace: false,
+            test_mode,
         })?;
         providers.push(process_provider);
+        if test_mode {
+            Self::wait_for_provider(&process_socket)?;
+        }
 
         // Spawn system provider
         let system_socket = provider_dir.join("igris-system.sock");
@@ -152,8 +165,13 @@ impl ProviderManager {
             cpu_period: Some(100000),
             pids_max: Some(8),
             enable_network_namespace: true,
+            enable_pid_namespace: true,
+            test_mode,
         })?;
         providers.push(system_provider);
+        if test_mode {
+            Self::wait_for_provider(&system_socket)?;
+        }
 
         // Spawn events provider
         let events_socket = provider_dir.join("igris-events.sock");
@@ -168,8 +186,13 @@ impl ProviderManager {
             cpu_period: Some(100000),
             pids_max: Some(16),
             enable_network_namespace: true,
+            enable_pid_namespace: true,
+            test_mode,
         })?;
         providers.push(events_provider);
+        if test_mode {
+            Self::wait_for_provider(&events_socket)?;
+        }
 
         // Wait for all providers to be ready
         for provider in &providers {
@@ -186,21 +209,26 @@ impl ProviderManager {
     fn spawn_provider(config: ProviderConfig) -> io::Result<ProviderHandle> {
         let socket_path = config.socket_path.clone();
 
-        // Create the provider directory for cgroup
-        let cgroup_name = format!("igris-{}", config.name);
-        let cgroup_path = cgroup::create_cgroup(&cgroup_name).map_err(cgroup_err_to_io)?;
+        let cgroup_path = if !config.test_mode {
+            // Create the provider directory for cgroup (only in production mode)
+            let cgroup_name = format!("igris-{}", config.name);
+            let cgroup_path = cgroup::create_cgroup(&cgroup_name).map_err(cgroup_err_to_io)?;
 
-        if let Some(limit) = config.memory_limit {
-            cgroup::set_memory_limit(&cgroup_path, limit).map_err(cgroup_err_to_io)?;
-        }
-        if let Some(quota) = config.cpu_quota {
-            if let Some(period) = config.cpu_period {
-                cgroup::set_cpu_limit(&cgroup_path, quota, period).map_err(cgroup_err_to_io)?;
+            if let Some(limit) = config.memory_limit {
+                cgroup::set_memory_limit(&cgroup_path, limit).map_err(cgroup_err_to_io)?;
             }
-        }
-        if let Some(max) = config.pids_max {
-            cgroup::set_pids_max(&cgroup_path, max).map_err(cgroup_err_to_io)?;
-        }
+            if let Some(quota) = config.cpu_quota {
+                if let Some(period) = config.cpu_period {
+                    cgroup::set_cpu_limit(&cgroup_path, quota, period).map_err(cgroup_err_to_io)?;
+                }
+            }
+            if let Some(max) = config.pids_max {
+                cgroup::set_pids_max(&cgroup_path, max).map_err(cgroup_err_to_io)?;
+            }
+            Some(cgroup_path)
+        } else {
+            None
+        };
 
         // Build the command
         let mut cmd = std::process::Command::new(config.binary);
@@ -210,48 +238,67 @@ impl ProviderManager {
             cmd.arg(wp);
         }
 
+        // Pass --test-mode to provider binary so it skips sandbox initialization
+        if config.test_mode {
+            cmd.arg("--test-mode");
+        }
+
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
 
-        // Apply sandboxing in pre_exec
-        let fs_root = config.fs_root.clone();
-        let writable_paths = config.writable_paths.clone();
-        let enable_network = config.enable_network_namespace;
-        let cgroup_path_for_child = cgroup_path.clone();
+        // Apply sandboxing in pre_exec (only in production mode)
+        if !config.test_mode {
+            let fs_root = config.fs_root.clone();
+            let writable_paths = config.writable_paths.clone();
+            let enable_network = config.enable_network_namespace;
+            let enable_pid = config.enable_pid_namespace;
+            let cgroup_path_for_child = cgroup_path.clone().unwrap();
 
-        unsafe {
-            cmd.pre_exec(move || {
-                if enable_network {
-                    namespace::setup_network_namespace()
+            unsafe {
+                cmd.pre_exec(move || {
+                    if enable_network {
+                        namespace::setup_network_namespace()
+                            .map_err(|e| io::Error::other(e.to_string()))?;
+                    }
+                    namespace::setup_mount_namespace(&fs_root, &writable_paths)
                         .map_err(|e| io::Error::other(e.to_string()))?;
-                }
-                namespace::setup_mount_namespace(&fs_root, &writable_paths)
-                    .map_err(|e| io::Error::other(e.to_string()))?;
-                namespace::setup_user_namespace().map_err(|e| io::Error::other(e.to_string()))?;
-                namespace::setup_pid_namespace().map_err(|e| io::Error::other(e.to_string()))?;
-                namespace::setup_ipc_namespace().map_err(|e| io::Error::other(e.to_string()))?;
-                namespace::setup_uts_namespace().map_err(|e| io::Error::other(e.to_string()))?;
+                    namespace::setup_user_namespace()
+                        .map_err(|e| io::Error::other(e.to_string()))?;
+                    if enable_pid {
+                        namespace::setup_pid_namespace()
+                            .map_err(|e| io::Error::other(e.to_string()))?;
+                    }
+                    namespace::setup_ipc_namespace()
+                        .map_err(|e| io::Error::other(e.to_string()))?;
+                    namespace::setup_uts_namespace()
+                        .map_err(|e| io::Error::other(e.to_string()))?;
 
-                seccomp::apply_default_filter(None).map_err(|e| io::Error::other(e.to_string()))?;
+                    seccomp::apply_default_filter(None)
+                        .map_err(|e| io::Error::other(e.to_string()))?;
 
-                // Attach to cgroup
-                cgroup::attach_current_process(&cgroup_path_for_child).map_err(cgroup_err_to_io)?;
+                    // Attach to cgroup
+                    cgroup::attach_current_process(&cgroup_path_for_child)
+                        .map_err(cgroup_err_to_io)?;
 
-                Ok(())
-            });
+                    Ok(())
+                });
+            }
         }
 
         let child = cmd.spawn()?;
 
-        // Attach the child process to the cgroup
-        cgroup::attach_current_process(&cgroup_path).map_err(cgroup_err_to_io)?;
+        // Attach the child process to the cgroup (only in production mode)
+        if !config.test_mode {
+            cgroup::attach_current_process(cgroup_path.as_ref().unwrap())
+                .map_err(cgroup_err_to_io)?;
+        }
 
         Ok(ProviderHandle {
             name: config.name,
             socket_path,
             process: Arc::new(Mutex::new(child)),
-            cgroup_path: Some(cgroup_path),
+            cgroup_path,
         })
     }
 

@@ -117,6 +117,8 @@ pub struct ConfirmationGate {
     session_manager: Arc<SessionManager>,
     tool_registry: Arc<ToolRegistry>,
     default_timeout: Duration,
+    /// If true, auto-approve confirmations for testing purposes.
+    test_mode: bool,
 }
 
 impl ConfirmationGate {
@@ -126,7 +128,14 @@ impl ConfirmationGate {
             session_manager,
             tool_registry,
             default_timeout: DEFAULT_CONFIRMATION_TIMEOUT,
+            test_mode: false,
         }
+    }
+
+    /// Enable test mode for auto-approving confirmations (for testing only).
+    pub fn with_test_mode(mut self, test_mode: bool) -> Self {
+        self.test_mode = test_mode;
+        self
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -178,6 +187,11 @@ impl ConfirmationGate {
 
         // Create confirmation request
         let now = Utc::now();
+        let status = if self.test_mode {
+            ConfirmationStatus::Approved
+        } else {
+            ConfirmationStatus::Pending
+        };
         let request = ConfirmationRequest {
             id: ConfirmationId::new(),
             session_id: session_id.clone(),
@@ -187,7 +201,7 @@ impl ConfirmationGate {
             expires_at: now
                 + chrono::Duration::from_std(self.default_timeout)
                     .unwrap_or(chrono::Duration::minutes(5)),
-            status: ConfirmationStatus::Pending,
+            status,
         };
 
         let request_id = request.id.clone();
@@ -382,7 +396,9 @@ mod tests {
         let gate = ConfirmationGate::new(session_mgr.clone(), registry.clone());
 
         let caps = CapabilitySet::from_iter(vec!["filesystem_write".to_string()]);
-        let session = session_mgr.create_session(caps).unwrap();
+        let session = session_mgr
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
 
         let tool_id = ToolId::new("fs.write");
         let args = serde_json::json!({
@@ -407,7 +423,9 @@ mod tests {
         let gate = ConfirmationGate::new(session_mgr.clone(), registry.clone());
 
         let caps = CapabilitySet::from_iter(vec!["filesystem_write".to_string()]);
-        let session = session_mgr.create_session(caps).unwrap();
+        let session = session_mgr
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
 
         let tool_id = ToolId::new("fs.write");
         let args = serde_json::json!({
@@ -432,7 +450,9 @@ mod tests {
         let gate = ConfirmationGate::new(session_mgr.clone(), registry.clone());
 
         let caps = CapabilitySet::from_iter(vec!["filesystem_write".to_string()]);
-        let session = session_mgr.create_session(caps).unwrap();
+        let session = session_mgr
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
 
         let tool_id = ToolId::new("fs.write");
         let args = serde_json::json!({
@@ -457,7 +477,9 @@ mod tests {
         let gate = ConfirmationGate::new(session_mgr.clone(), registry.clone());
 
         let caps = CapabilitySet::from_iter(vec!["filesystem_write".to_string()]);
-        let session = session_mgr.create_session(caps).unwrap();
+        let session = session_mgr
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
 
         let tool_id = ToolId::new("fs.write");
         let args = serde_json::json!({
@@ -492,7 +514,9 @@ mod tests {
         let gate = ConfirmationGate::new(session_mgr.clone(), registry.clone());
 
         let caps = CapabilitySet::from_iter(vec!["filesystem_write".to_string()]);
-        let session = session_mgr.create_session(caps).unwrap();
+        let session = session_mgr
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
 
         let tool_id = ToolId::new("fs.write");
         let args1 = serde_json::json!({
@@ -529,7 +553,9 @@ mod tests {
             .with_timeout(Duration::from_nanos(1));
 
         let caps = CapabilitySet::from_iter(vec!["filesystem_write".to_string()]);
-        let session = session_mgr.create_session(caps).unwrap();
+        let session = session_mgr
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
 
         let tool_id = ToolId::new("fs.write");
         let args = serde_json::json!({
@@ -560,7 +586,9 @@ mod tests {
         let gate = ConfirmationGate::new(session_mgr.clone(), registry.clone());
 
         let caps = CapabilitySet::from_iter(vec!["filesystem_write".to_string()]);
-        let session = session_mgr.create_session(caps).unwrap();
+        let session = session_mgr
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
 
         let tool_id = ToolId::new("fs.write");
         let args = serde_json::json!({
@@ -592,7 +620,9 @@ mod tests {
         let gate = ConfirmationGate::new(session_mgr.clone(), registry.clone());
 
         let caps = CapabilitySet::from_iter(vec!["filesystem_read".to_string()]);
-        let session = session_mgr.create_session(caps).unwrap();
+        let session = session_mgr
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
 
         // fs.read doesn't require confirmation
         let tool_id = ToolId::new("fs.read");
@@ -623,5 +653,104 @@ mod tests {
         let id2 = ConfirmationId::new();
         adapter.set_decision(id2.clone(), false);
         assert!(!adapter.decide(&id2));
+    }
+
+    /// Security test: Demonstrates that the confirmation gate does NOT enforce
+    /// a trusted-human approval boundary. Any caller with access to the
+    /// confirmation gate can approve confirmations, including the agent itself.
+    ///
+    /// This test documents the current architecture limitation: the confirmation
+    /// mechanism prevents accidental/automatic execution of sensitive operations,
+    /// but does not provide a cryptographic or out-of-band human approval channel.
+    ///
+    /// The confirmation token is a bearer token - anyone who obtains it can use it.
+    /// The confirmation_id is returned in the error response to the original caller,
+    /// allowing that same caller to approve its own operation.
+    #[test]
+    fn confirmation_gate_allows_self_approval_no_trusted_human_boundary() {
+        let registry = Arc::new(igris_tool_registry::default_registry());
+        let session_mgr = Arc::new(SessionManager::new(registry.clone()));
+        let gate = ConfirmationGate::new(session_mgr.clone(), registry.clone());
+
+        let caps = CapabilitySet::from_iter(vec!["filesystem_write".to_string()]);
+        let session = session_mgr
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
+
+        let tool_id = ToolId::new("fs.write");
+        let args = serde_json::json!({
+            "path": "/test.txt",
+            "content_base64": "dGVzdA==",
+            "confirm": true
+        });
+
+        // Step 1: Agent requests confirmation (simulates daemon creating request)
+        let request = gate
+            .request_confirmation(&session.id, &tool_id, args.clone())
+            .unwrap();
+
+        // Step 2: Agent (or any caller) retrieves the confirmation_id from the error
+        // This is the SAME caller that initiated the operation
+        let confirmation_id = request.id.clone();
+
+        // Step 3: Agent approves its OWN confirmation request
+        // No human intervention, no external approval channel
+        let result = gate.approve(&confirmation_id).unwrap();
+
+        // Step 4: Agent receives the one-time token
+        assert!(result.token.is_some());
+        let token = result.token.unwrap();
+
+        // Step 5: Agent uses token to execute the sensitive operation
+        gate.validate_and_consume(&session.id, &tool_id, &args, &token)
+            .unwrap();
+
+        // The gate allowed full self-approval without any trusted human boundary.
+        // This is the documented limitation: the confirmation gate prevents
+        // accidental execution but is NOT a human-approval mechanism.
+    }
+
+    /// Security test: Demonstrates that confirmation tokens are bearer tokens.
+    /// Anyone who obtains the token can use it - there's no binding to a
+    /// specific caller identity beyond the session.
+    #[test]
+    fn confirmation_token_is_bearer_token_no_caller_binding() {
+        let registry = Arc::new(igris_tool_registry::default_registry());
+        let session_mgr = Arc::new(SessionManager::new(registry.clone()));
+        let gate = ConfirmationGate::new(session_mgr.clone(), registry.clone());
+
+        let caps = CapabilitySet::from_iter(vec!["filesystem_write".to_string()]);
+        let session = session_mgr
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
+
+        let tool_id = ToolId::new("fs.write");
+        let args = serde_json::json!({
+            "path": "/test.txt",
+            "content_base64": "dGVzdA==",
+            "confirm": true
+        });
+
+        // Create and approve confirmation
+        let request = gate
+            .request_confirmation(&session.id, &tool_id, args.clone())
+            .unwrap();
+        let result = gate.approve(&request.id).unwrap();
+        let token = result.token.unwrap();
+
+        // The token can be used by ANYONE who has it - no caller verification
+        // Simulate token theft/leak: a different context uses the same token
+        gate.validate_and_consume(&session.id, &tool_id, &args, &token)
+            .unwrap();
+
+        // Second use fails (one-time consumption)
+        let result2 = gate.validate_and_consume(&session.id, &tool_id, &args, &token);
+        assert!(result2.is_err());
+        assert!(matches!(
+            result2.unwrap_err(),
+            ConfirmationError::ConfirmationAlreadyUsed
+        ));
+
+        // This demonstrates: token = bearer credential, no caller identity check
     }
 }
