@@ -5,7 +5,7 @@ kernel is the foundation; the project builds a progressively integrated AI
 system layer on top of it, connected through structured tools and APIs and
 governed by a least-privilege permission model.
 
-> **Status: Milestone 6 (event observation) implemented.**
+> **Status: Milestone 9.3.1 (production confirmation gate, PID namespace configuration) implemented.**
 > The `igrisd` daemon, `igrisctl` client, default-deny permission engine,
 > structured Unix-socket IPC with append-only audit logging, and the following
 > tool families are functional:
@@ -17,9 +17,6 @@ governed by a least-privilege permission model.
 >
 > The event-observation protocol, stateful provider, and real filesystem event
 > production via Linux inotify are implemented.
-> Process event observation is not implemented.
-> Streaming IPC is not implemented.
-> The AI agent layer remains a Phase 0 scaffold.
 > Process event observation is not implemented.
 > Streaming IPC is not implemented.
 > The AI agent layer remains a Phase 0 scaffold.
@@ -209,8 +206,18 @@ The project follows an incremental, test-driven roadmap:
 - **Phase 5** — OS-level integration (systemd, D-Bus, seccomp, packaging)
 - **Phase 6** — Installable Igris OS environment (VM, bootable image)
 
+## Known Limitations
+
+The following limitations are documented based on the current implementation state (as of Milestone 9.3.1):
+
+- **Production-mode sandbox initialization has not been verified by a passing privileged runtime test.** The `Server::bind()` production path spawns sandboxed providers requiring Linux namespaces, cgroups v2, and seccomp — capabilities unavailable in standard CI environments. Tests exercising this path are marked `#[ignore]` and require a privileged runner (`--privileged`, cgroups v2, seccomp).
+- **Existing IPC integration tests do not prove production-mode sandbox behavior.** The `ipc_integration` test suite uses `Server::bind_test()`, which runs providers in test mode (skipping sandbox initialization). These tests verify protocol correctness and authorization logic, not runtime isolation.
+- **The trusted-human approval daemon is not yet integrated into the actual request path.** The `igris-approval` crate exists but is not wired into the confirmation gate. The current confirmation mechanism uses bearer tokens (ADR 0010, ADR 0011).
+- **Confirmation tokens remain bearer tokens until the trusted approval architecture is implemented.** Any holder of a valid token can approve a sensitive operation; there is no cryptographic binding to a specific human reviewer.
+- **The intermediate-ancestor PID reuse race remains a documented residual risk.** The `is_descendant_of()` check and provider-side `pidfd` validation mitigate direct parent reuse, but an intermediate ancestor between the session owner and target process could be reused. This is documented in ADR 0011.
+
 ## License
 
 This project is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full license text.
 
-Copyright 2024-2025 Igris OS Contributors.
+Copyright 2024-2026 KRISHNA KANTA BERA.

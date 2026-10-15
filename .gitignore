@@ -42,7 +42,5 @@ audit.log
 *.orig
 
 # OS / filesystem
-.DS_Store
-Thumbs.db
 ehthumbs.db
 Desktop.ini
