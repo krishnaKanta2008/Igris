@@ -27,7 +27,8 @@ where
 {
     // Apply sandboxing unless in test mode
     if !test_mode {
-        init_provider_sandbox(fs_root, writable_paths, true, None)
+        // Process provider runs without PID namespace to see host PIDs for process management
+        init_provider_sandbox(fs_root, writable_paths, true, false, None)
             .map_err(|e| std::io::Error::other(format!("sandbox init failed: {}", e)))?;
     }
 

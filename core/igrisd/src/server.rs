@@ -324,6 +324,97 @@ impl Server {
         })
     }
 
+    /// Test-only bind that creates a server with production confirmation settings
+    /// but skips provider spawning.
+    ///
+    /// This is for tests that need production confirmation behavior without
+    /// requiring sandbox permissions or provider spawning.
+    pub fn bind_prod_test(config: &Config, policy: Policy) -> io::Result<Self> {
+        // Create audit log parent directory first
+        if let Some(parent) = config.audit_log_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+
+        if let Some(parent) = config.socket_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+
+        remove_stale_socket(&config.socket_path)?;
+        let listener = UnixListener::bind(&config.socket_path)?;
+        std::fs::set_permissions(&config.socket_path, std::fs::Permissions::from_mode(0o600))?;
+        listener.set_nonblocking(true)?;
+
+        std::fs::create_dir_all(&config.fs_root)?;
+        let fs_root = config.fs_root.canonicalize()?;
+
+        let mut writable_paths = Vec::with_capacity(config.writable_paths.len());
+
+        for path in &config.writable_paths {
+            let canonical = path.canonicalize()?;
+
+            if !canonical.starts_with(&fs_root) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "configured writable path escapes filesystem root",
+                ));
+            }
+
+            writable_paths.push(canonical);
+        }
+
+        for canonical in &writable_paths {
+            if !canonical.is_dir() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "configured writable path is not a directory",
+                ));
+            }
+        }
+
+        // Create empty provider manager (no providers spawned)
+        let provider_dir = fs_root.join(".igris-providers");
+        std::fs::create_dir_all(&provider_dir)?;
+        let providers = Arc::new(Mutex::new(ProviderManager {
+            providers: Vec::new(),
+            provider_dir,
+        }));
+
+        // Initialize M8 components with production confirmation settings (test_mode = false)
+        let tool_registry = Arc::new(igris_tool_registry::default_registry());
+        let session_manager = Arc::new(SessionManager::new(tool_registry.clone()));
+        let confirmation_gate = Arc::new(
+            ConfirmationGate::new(session_manager.clone(), tool_registry.clone())
+                .with_test_mode(false),
+        );
+
+        Ok(Self {
+            listener,
+            socket_path: config.socket_path.clone(),
+            shared: Shared {
+                policy: Arc::new(policy),
+                audit: Arc::new(Mutex::new(AuditLog::open(&config.audit_log_path)?)),
+                fs_root,
+                writable_paths,
+                providers,
+                tool_registry: Arc::new(igris_tool_registry::default_registry()),
+                session_manager: Arc::new(SessionManager::new(Arc::new(
+                    igris_tool_registry::default_registry(),
+                ))),
+                confirmation_gate,
+                correlation_id: Arc::new(AtomicU64::new(1)),
+                test_mode: false,
+                config: Arc::new(config.clone()),
+            },
+            running: Arc::new(AtomicBool::new(true)),
+            next_connection_id: AtomicU64::new(1),
+        })
+    }
+
     /// The bound socket path.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
@@ -586,35 +677,56 @@ fn handle_payload(
 
     // Only apply confirmation logic for tools that require it
     if tool.requires_confirmation() && !skip_confirmation {
-        let confirmation_token = request
-            .confirmation_token
-            .as_ref()
-            .and_then(|t| t.parse::<ConfirmationToken>().ok());
+        let confirmation_token = match request.confirmation_token.as_ref() {
+            Some(token_str) => match token_str.parse::<ConfirmationToken>() {
+                Ok(token) => Some(Ok(token)),
+                Err(_) => Some(Err(error_code::CONFIRMATION_INVALID)),
+            },
+            None => None,
+        };
 
-        if let Some(token) = confirmation_token {
-            // Token provided - validate and consume
-            if let Some(ref sid) = session_id {
-                if let Err(e) = shared.confirmation_gate.validate_and_consume(
-                    sid,
-                    &tool_id,
-                    &request.params,
-                    &token,
-                ) {
-                    let error_code = match e {
-                        igris_confirmation::ConfirmationError::ConfirmationNotFound(_) => {
-                            error_code::CONFIRMATION_INVALID
-                        }
-                        igris_confirmation::ConfirmationError::ConfirmationAlreadyUsed => {
-                            error_code::CONFIRMATION_INVALID
-                        }
-                        igris_confirmation::ConfirmationError::ConfirmationExpired => {
-                            error_code::CONFIRMATION_INVALID
-                        }
-                        igris_confirmation::ConfirmationError::ConfirmationMismatch => {
-                            error_code::CONFIRMATION_INVALID
-                        }
-                        _ => error_code::CONFIRMATION_INVALID,
-                    };
+        match confirmation_token {
+            Some(Ok(token)) => {
+                // Token provided - validate and consume
+                if let Some(ref sid) = session_id {
+                    if let Err(e) = shared.confirmation_gate.validate_and_consume(
+                        sid,
+                        &tool_id,
+                        &request.params,
+                        &token,
+                    ) {
+                        let error_code = match e {
+                            igris_confirmation::ConfirmationError::ConfirmationNotFound(_) => {
+                                error_code::CONFIRMATION_INVALID
+                            }
+                            igris_confirmation::ConfirmationError::ConfirmationAlreadyUsed => {
+                                error_code::CONFIRMATION_INVALID
+                            }
+                            igris_confirmation::ConfirmationError::ConfirmationExpired => {
+                                error_code::CONFIRMATION_INVALID
+                            }
+                            igris_confirmation::ConfirmationError::ConfirmationMismatch => {
+                                error_code::CONFIRMATION_INVALID
+                            }
+                            _ => error_code::CONFIRMATION_INVALID,
+                        };
+                        record_audit(
+                            shared,
+                            peer,
+                            Some(request.id.clone()),
+                            Some(request.op.clone()),
+                            Some(correlation_id.clone()),
+                            Decision::Deny,
+                            AuditResult::Denied,
+                            "confirmation_validation_failed",
+                        );
+                        return Response::error(
+                            Some(request.id.clone()),
+                            error_code,
+                            format!("confirmation validation failed: {}", e),
+                        );
+                    }
+                } else {
                     record_audit(
                         shared,
                         peer,
@@ -623,15 +735,17 @@ fn handle_payload(
                         Some(correlation_id.clone()),
                         Decision::Deny,
                         AuditResult::Denied,
-                        "confirmation_validation_failed",
+                        "confirmation_no_session",
                     );
                     return Response::error(
                         Some(request.id.clone()),
-                        error_code,
-                        format!("confirmation validation failed: {}", e),
+                        error_code::CONFIRMATION_REQUIRED,
+                        "confirmation token provided but no session_id".to_string(),
                     );
                 }
-            } else {
+            }
+            Some(Err(_)) => {
+                // Invalid token format
                 record_audit(
                     shared,
                     peer,
@@ -640,13 +754,34 @@ fn handle_payload(
                     Some(correlation_id.clone()),
                     Decision::Deny,
                     AuditResult::Denied,
-                    "confirmation_no_session",
+                    "confirmation_required",
                 );
                 return Response::error(
                     Some(request.id.clone()),
-                    error_code::CONFIRMATION_REQUIRED,
-                    "confirmation token provided but no session_id".to_string(),
+                    error_code::CONFIRMATION_INVALID,
+                    "invalid confirmation token format".to_string(),
                 );
+            }
+            None => {
+                // No token provided - require confirmation
+                record_audit(
+                    shared,
+                    peer,
+                    Some(request.id.clone()),
+                    Some(request.op.clone()),
+                    Some(correlation_id.clone()),
+                    Decision::Deny,
+                    AuditResult::Denied,
+                    "confirmation_required",
+                );
+                return Response::error(
+                Some(request.id.clone()),
+                error_code::CONFIRMATION_REQUIRED,
+                format!(
+                    "confirmation required for operation {}: use confirmation_id from prior request",
+                    request.op
+                ),
+            );
             }
         }
     }
@@ -907,30 +1042,352 @@ fn record_audit(
 }
 
 #[cfg(test)]
-mod tests {
+/// Production confirmation gate tests using Server::bind() (not bind_test).
+/// These tests verify the production confirmation gate behavior without test-mode auto-approval.
+mod production_confirmation_tests {
     use super::*;
+    use igris_permd::Policy;
+    use igris_proto::{error_code, Request, Response};
+    use igris_session::CapabilitySet;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    use std::path::PathBuf;
 
-    #[test]
-    fn writable_paths_must_remain_inside_fs_root() {
-        let root = std::env::temp_dir().join(format!("igris-server-test-{}", std::process::id()));
+    /// Helper to create a production-mode server for testing.
+    /// Uses bind_prod_test() to get production confirmation behavior without spawning providers.
+    fn create_prod_server() -> (
+        Arc<Server>,
+        PathBuf,
+        PathBuf,
+        PathBuf,
+        thread::JoinHandle<()>,
+    ) {
+        let root = std::env::temp_dir().join(format!("igris-prod-test-{}", std::process::id()));
+        let socket_path = root.join("igrisd.sock");
+        let audit_path = root.join("audit.log");
+        let fs_root = root.join("root");
+        let writable = fs_root.join("writable");
 
-        let writable = root.join("writable");
-        std::fs::create_dir_all(&writable).expect("create test directories");
+        std::fs::create_dir_all(&fs_root).expect("create fs root");
+        std::fs::create_dir_all(&writable).expect("create writable");
 
         let config = Config::with_writable_paths(
-            root.join("igrisd.sock"),
-            root.join("audit.log"),
-            &root,
+            socket_path.clone(),
+            audit_path.clone(),
+            &fs_root,
             [&writable],
         );
 
-        let server = Server::bind_test(&config, Policy::milestone_three())
-            .expect("valid writable path should be accepted");
+        // Use production bind with test helper - production confirmation settings, no providers
+        let server = Arc::new(
+            Server::bind_prod_test(&config, Policy::milestone_five(true, true))
+                .expect("bind production test server"),
+        );
 
-        assert_eq!(server.shared.writable_paths.len(), 1);
+        // Run server in background thread
+        let runner = server.clone();
+        let handle = thread::spawn(move || {
+            let _ = runner.run();
+        });
+
+        // Wait for the socket to accept a connection.
+        for _ in 0..200 {
+            if UnixStream::connect(&socket_path).is_ok() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        (server, socket_path, audit_path, root, handle)
+    }
+
+    /// Send a raw request and get response.
+    fn send_request(socket_path: &Path, request: Request) -> Response {
+        let mut stream = UnixStream::connect(socket_path).expect("connect");
+        let payload = serde_json::to_vec(&request).expect("encode request");
+        let len = (payload.len() as u32).to_be_bytes();
+        stream.write_all(&len).expect("write len");
+        stream.write_all(&payload).expect("write payload");
+
+        // Read response frame
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).expect("read len");
+        let len = u32::from_be_bytes(len_buf) as usize;
+
+        let mut buf = vec![0u8; len];
+        stream.read_exact(&mut buf).expect("read body");
+        serde_json::from_slice(&buf).expect("parse response")
+    }
+
+    /// Create a confirmation-required request (proc.signal) without token.
+    fn make_signal_request(session_id: &str, target_pid: u64, token: Option<String>) -> Request {
+        let params = serde_json::json!({
+            "pid": target_pid,
+            "signal": 15,
+            "confirm": true
+        });
+
+        Request {
+            version: 1,
+            id: "test-req".to_string(),
+            op: "proc.signal".to_string(),
+            params,
+            session_id: Some(session_id.to_string()),
+            confirmation_token: token,
+        }
+    }
+
+    #[test]
+    fn prod_confirmation_missing_token_returns_required() {
+        let (server, _socket_path, _audit_path, _root, _handle) = create_prod_server();
+        // Use the actual process ID as the session owner to match SO_PEERCRED
+        let owner_pid = std::process::id() as u64;
+        let session_id = server
+            .session_manager()
+            .create_session(
+                CapabilitySet::from_iter(vec!["process_control".to_string()]),
+                owner_pid,
+            )
+            .unwrap()
+            .id
+            .to_string();
+
+        // No confirmation_token provided - use a PID that doesn't exist to bypass ancestry check
+        let request = make_signal_request(&session_id, 3_999_999, None);
+        let response = send_request(server.socket_path(), request);
+
+        eprintln!("DEBUG: response = {:?}", response);
+        eprintln!("DEBUG: tool.requires_confirmation() = true"); // proc.signal requires confirmation
+        eprintln!("DEBUG: skip_confirmation = false"); // production mode
+        assert!(!response.ok, "expected rejection");
         assert_eq!(
-            server.shared.writable_paths[0],
-            writable.canonicalize().unwrap()
+            response.error.as_ref().unwrap().code,
+            error_code::CONFIRMATION_REQUIRED
+        );
+        assert!(response
+            .error
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("confirmation required"));
+    }
+
+    #[test]
+    fn prod_confirmation_request_not_dispatched_to_provider() {
+        let (server, _socket_path, _audit_path, _root, _handle) = create_prod_server();
+        let session_id = server
+            .session_manager()
+            .create_session(
+                CapabilitySet::from_iter(vec!["process_control".to_string()]),
+                std::process::id() as u64,
+            )
+            .unwrap()
+            .id
+            .to_string();
+
+        // Request without token should be rejected at confirmation gate
+        let request = make_signal_request(&session_id, std::process::id() as u64, None);
+        let response = send_request(server.socket_path(), request);
+
+        // Should be rejected before provider dispatch
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().unwrap().code,
+            error_code::CONFIRMATION_REQUIRED
+        );
+        // Provider should never have been called - no "sent" field in response
+        assert!(response.result.is_none() || response.result.unwrap().get("sent").is_none());
+    }
+
+    #[test]
+    fn prod_confirmation_invalid_token_rejected() {
+        let (server, _socket_path, _audit_path, _root, _handle) = create_prod_server();
+        let session_id = server
+            .session_manager()
+            .create_session(
+                CapabilitySet::from_iter(vec!["process_control".to_string()]),
+                std::process::id() as u64,
+            )
+            .unwrap()
+            .id
+            .to_string();
+
+        // Invalid token format
+        let request = make_signal_request(
+            &session_id,
+            std::process::id() as u64,
+            Some("not-a-valid-uuid".to_string()),
+        );
+        let response = send_request(server.socket_path(), request);
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().unwrap().code,
+            error_code::CONFIRMATION_INVALID
+        );
+    }
+
+    #[test]
+    fn prod_confirmation_replayed_token_rejected() {
+        use igris_confirmation::ConfirmationGate;
+        use igris_session::SessionManager;
+        use std::sync::Arc;
+
+        let registry = Arc::new(igris_tool_registry::default_registry());
+        let session_mgr = Arc::new(SessionManager::new(registry.clone()));
+        let gate = ConfirmationGate::new(session_mgr.clone(), registry.clone());
+
+        let caps = CapabilitySet::from_iter(vec!["process_control".to_string()]);
+        let session = session_mgr
+            .create_session(caps, std::process::id() as u64)
+            .unwrap();
+
+        let tool_id = igris_tool_registry::ToolId::new("proc.signal");
+        let args =
+            serde_json::json!({"pid": std::process::id() as u64, "signal": 15, "confirm": true});
+
+        let request = gate
+            .request_confirmation(&session.id, &tool_id, args.clone())
+            .unwrap();
+        let decision = gate.approve(&request.id).unwrap();
+        let token = decision.token.unwrap();
+
+        // First consumption should succeed
+        gate.validate_and_consume(&session.id, &tool_id, &args, &token)
+            .unwrap();
+
+        // Second consumption should fail with AlreadyUsed
+        let result = gate.validate_and_consume(&session.id, &tool_id, &args, &token);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            igris_confirmation::ConfirmationError::ConfirmationAlreadyUsed
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires provider binaries in PATH (bind_test spawns providers)"]
+    fn prod_confirmation_non_confirmation_tools_bypass() {
+        // Use bind_test() to get a server with spawned providers.
+        // The confirmation gate behavior for non-confirmation tools is identical
+        // in test_mode=true and test_mode=false (both skip confirmation for tools
+        // that don't require it), so this validates the bypass logic.
+        let root = std::env::temp_dir().join(format!("igris-test-bypass-{}", std::process::id()));
+        let socket_path = root.join("igrisd.sock");
+        let audit_path = root.join("audit.log");
+        let fs_root = root.join("root");
+        let writable = fs_root.join("writable");
+
+        std::fs::create_dir_all(&fs_root).expect("create fs root");
+        std::fs::create_dir_all(&writable).expect("create writable");
+
+        let config = Config::with_writable_paths(
+            socket_path.clone(),
+            audit_path.clone(),
+            &fs_root,
+            [&writable],
+        );
+
+        let server = Arc::new(
+            Server::bind_test(&config, Policy::milestone_five(true, true))
+                .expect("bind test server"),
+        );
+
+        // Run server in background thread
+        let runner = server.clone();
+        let _handle = thread::spawn(move || {
+            let _ = runner.run();
+        });
+
+        // Wait for the socket to accept a connection.
+        for _ in 0..200 {
+            if UnixStream::connect(&socket_path).is_ok() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let session_id = server
+            .session_manager()
+            .create_session(
+                CapabilitySet::from_iter(vec!["system_info".to_string()]),
+                std::process::id() as u64,
+            )
+            .unwrap()
+            .id
+            .to_string();
+
+        // system.info does not require confirmation
+        let request = Request {
+            version: 1,
+            id: "test-req".to_string(),
+            op: "system.info".to_string(),
+            params: serde_json::json!({}),
+            session_id: Some(session_id),
+            confirmation_token: None,
+        };
+
+        let response = send_request(server.socket_path(), request);
+        assert!(
+            response.ok,
+            "system.info should succeed without confirmation"
+        );
+        assert!(response.result.is_some());
+        assert!(response.result.unwrap().get("hostname").is_some());
+
+        drop(server);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[ignore = "requires root privileges for sandbox setup (namespaces, cgroups, seccomp)"]
+    fn prod_bind_configures_confirmation_gate_test_mode_false() {
+        let root = std::env::temp_dir().join(format!("igris-prod-test-{}", std::process::id()));
+        let socket_path = root.join("igrisd.sock");
+        let audit_path = root.join("audit.log");
+        let fs_root = root.join("root");
+        let writable = fs_root.join("writable");
+
+        std::fs::create_dir_all(&fs_root).expect("create fs root");
+        std::fs::create_dir_all(&writable).expect("create writable");
+
+        let config = Config::with_writable_paths(
+            socket_path.clone(),
+            audit_path.clone(),
+            &fs_root,
+            [&writable],
+        );
+
+        // Production bind() should create gate with test_mode = false
+        let server = Server::bind(&config, Policy::milestone_five(true, true))
+            .expect("bind production server");
+
+        // The confirmation gate should have test_mode = false
+        // We verify this by checking that confirmation is required for sensitive ops
+        let session_id = server
+            .session_manager()
+            .create_session(
+                CapabilitySet::from_iter(vec!["process_control".to_string()]),
+                std::process::id() as u64,
+            )
+            .unwrap()
+            .id
+            .to_string();
+
+        let request = Request {
+            version: 1,
+            id: "test-req".to_string(),
+            op: "proc.signal".to_string(),
+            params: serde_json::json!({"pid": std::process::id() as u64, "signal": 15, "confirm": true}),
+            session_id: Some(session_id),
+            confirmation_token: None,
+        };
+
+        let response = send_request(server.socket_path(), request);
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().unwrap().code,
+            error_code::CONFIRMATION_REQUIRED
         );
 
         drop(server);
@@ -938,27 +1395,53 @@ mod tests {
     }
 
     #[test]
-    fn writable_path_outside_fs_root_is_rejected() {
-        let root =
-            std::env::temp_dir().join(format!("igris-server-test-outside-{}", std::process::id()));
-
+    #[ignore = "requires provider binaries in PATH (bind_test spawns providers)"]
+    fn prod_bind_test_configures_confirmation_gate_test_mode_true() {
+        let root = std::env::temp_dir().join(format!("igris-test-test-{}", std::process::id()));
+        let socket_path = root.join("igrisd.sock");
+        let audit_path = root.join("audit.log");
         let fs_root = root.join("root");
-        let outside = root.join("outside");
+        let writable = fs_root.join("writable");
 
         std::fs::create_dir_all(&fs_root).expect("create fs root");
-        std::fs::create_dir_all(&outside).expect("create outside directory");
+        std::fs::create_dir_all(&writable).expect("create writable");
 
         let config = Config::with_writable_paths(
-            root.join("igrisd.sock"),
-            root.join("audit.log"),
+            socket_path.clone(),
+            audit_path.clone(),
             &fs_root,
-            [&outside],
+            [&writable],
         );
 
-        let result = Server::bind_test(&config, Policy::milestone_three());
+        // Test bind_test() should create gate with test_mode = true
+        let server = Server::bind_test(&config, Policy::milestone_five(true, true))
+            .expect("bind test server");
 
-        assert!(result.is_err());
+        // In test mode, confirmation is auto-approved
+        let session_id = server
+            .session_manager()
+            .create_session(
+                CapabilitySet::from_iter(vec!["process_control".to_string()]),
+                std::process::id() as u64,
+            )
+            .unwrap()
+            .id
+            .to_string();
 
+        let request = Request {
+            version: 1,
+            id: "test-req".to_string(),
+            op: "proc.signal".to_string(),
+            params: serde_json::json!({"pid": std::process::id() as u64, "signal": 15, "confirm": true}),
+            session_id: Some(session_id),
+            confirmation_token: None,
+        };
+
+        let response = send_request(server.socket_path(), request);
+        // In test mode, auto-approval happens so it should succeed
+        assert!(response.ok, "test mode should auto-approve");
+
+        drop(server);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

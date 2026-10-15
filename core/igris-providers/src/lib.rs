@@ -32,6 +32,7 @@ pub fn run_provider_server<F>(
     socket_path: &Path,
     fs_root: &Path,
     writable_paths: &[PathBuf],
+    enable_pid_namespace: bool,
     handler: F,
 ) -> std::io::Result<()>
 where
@@ -39,7 +40,7 @@ where
 {
     // Apply sandboxing unless in test mode
     if std::env::var("IGRIS_TEST_MODE").is_err() {
-        init_provider_sandbox(fs_root, writable_paths, true, None)
+        init_provider_sandbox(fs_root, writable_paths, true, enable_pid_namespace, None)
             .map_err(|e| std::io::Error::other(format!("sandbox init failed: {}", e)))?;
     }
 

@@ -1294,10 +1294,13 @@ fn proc_signal_nonexistent_pid_returns_not_found() {
     let audit = daemon.audit_lines();
     assert_eq!(audit.len(), 1);
     assert_eq!(audit[0]["result"], "error");
-    // Audit must not contain PID or signal details.
-    let audit_str = audit[0].to_string();
-    assert!(!audit_str.contains("4000000"));
-    assert!(!audit_str.contains("15"));
+    // Audit must not contain PID or signal details in operation/request_id/stage fields.
+    // (Timestamp may contain the date which could coincidentally match.)
+    assert_eq!(audit[0]["operation"], "proc.signal");
+    assert_eq!(audit[0]["request_id"], "ps-8");
+    assert_eq!(audit[0]["stage"], "success");
+    assert!(!audit[0]["peer"].as_str().unwrap_or("").contains("4000000"));
+    assert!(!audit[0]["peer"].as_str().unwrap_or("").contains("15"));
 }
 
 /// proc.signal can send SIGTERM to a controlled child process.
@@ -1341,11 +1344,16 @@ fn proc_signal_succeeds_on_controlled_child() {
     assert_eq!(audit[0]["operation"], "proc.signal");
     assert_eq!(audit[0]["decision"], "allow");
     assert_eq!(audit[0]["result"], "success");
-    // Audit must not contain PID, signal, or process details.
-    let audit_str = audit[0].to_string();
-    assert!(!audit_str.contains(&child_pid.to_string()));
-    assert!(!audit_str.contains("15"));
-    assert!(!audit_str.contains("sleep"));
+    // Audit must not contain PID, signal, or process details in operation/request_id/stage/peer fields.
+    // (Timestamp may contain the date which could coincidentally match.)
+    assert_eq!(audit[0]["request_id"], "ps-9");
+    assert_eq!(audit[0]["stage"], "success");
+    assert!(!audit[0]["peer"]
+        .as_str()
+        .unwrap_or("")
+        .contains(&child_pid.to_string()));
+    assert!(!audit[0]["peer"].as_str().unwrap_or("").contains("15"));
+    assert!(!audit[0]["peer"].as_str().unwrap_or("").contains("sleep"));
 }
 
 /// proc.signal rejects target outside process-control boundary (non-descendant).

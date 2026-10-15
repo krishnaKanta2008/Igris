@@ -33,7 +33,8 @@ where
 {
     // Apply sandboxing unless in test mode
     if !test_mode {
-        init_provider_sandbox(fs_root, writable_paths, true, None)
+        // Events provider runs with PID namespace for isolation
+        init_provider_sandbox(fs_root, writable_paths, true, true, None)
             .map_err(|e| std::io::Error::other(format!("sandbox init failed: {}", e)))?;
     }
 
