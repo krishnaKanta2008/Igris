@@ -47,11 +47,6 @@
   ],
   "anchors": [
     {
-      "name": "Documentation",
-      "icon": "book-open",
-      "url": "/introduction"
-    },
-    {
       "name": "API Reference",
       "icon": "code",
       "url": "/api-reference/overview"
@@ -69,10 +64,16 @@
   ],
   "navigation": [
     {
+      "group": "Introduction",
+      "icon": "book-open",
+      "pages": [
+        "introduction"
+      ]
+    },
+    {
       "group": "Getting Started",
       "icon": "rocket",
       "pages": [
-        "introduction",
         "getting-started",
         "quick-start"
       ]
