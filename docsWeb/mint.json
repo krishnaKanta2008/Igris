@@ -72,75 +72,75 @@
       "group": "Getting Started",
       "icon": "rocket",
       "pages": [
-        { "name": "Introduction", "page": "introduction", "icon": "book-open" },
-        { "name": "Getting Started", "page": "getting-started", "icon": "play" },
-        { "name": "Quick Start", "page": "quick-start", "icon": "zap" }
+        "introduction",
+        "getting-started",
+        "quick-start"
       ]
     },
     {
       "group": "Core Concepts",
       "icon": "layers",
       "pages": [
-        { "name": "Architecture", "page": "core-concepts/architecture", "icon": "diagram" },
-        { "name": "Security Model", "page": "core-concepts/security-model", "icon": "shield" },
-        { "name": "IPC Protocol", "page": "core-concepts/ipc-protocol", "icon": "plug" },
-        { "name": "Event System", "page": "core-concepts/event-system", "icon": "bell" },
-        { "name": "Agent Trust Boundaries", "page": "core-concepts/agent-trust-boundaries", "icon": "users" }
+        "core-concepts/architecture",
+        "core-concepts/security-model",
+        "core-concepts/ipc-protocol",
+        "core-concepts/event-system",
+        "core-concepts/agent-trust-boundaries"
       ]
     },
     {
       "group": "API Reference",
       "icon": "code",
       "pages": [
-        { "name": "Overview", "page": "api-reference/overview", "icon": "file-text" },
-        { "name": "System Tools", "page": "api-reference/system-tools", "icon": "cpu" },
-        { "name": "Filesystem Tools", "page": "api-reference/filesystem-tools", "icon": "folder" },
-        { "name": "Process Tools", "page": "api-reference/process-tools", "icon": "activity" },
-        { "name": "Event Tools", "page": "api-reference/event-tools", "icon": "bell-ring" },
-        { "name": "Permission System", "page": "api-reference/permission-system", "icon": "key" },
-        { "name": "Tool Registry", "page": "api-reference/tool-registry", "icon": "list" },
-        { "name": "Session Capabilities", "page": "api-reference/session-capabilities", "icon": "id-card" },
-        { "name": "Confirmation Gate", "page": "api-reference/confirmation-gate", "icon": "check-circle" }
+        "api-reference/overview",
+        "api-reference/system-tools",
+        "api-reference/filesystem-tools",
+        "api-reference/process-tools",
+        "api-reference/event-tools",
+        "api-reference/permission-system",
+        "api-reference/tool-registry",
+        "api-reference/session-capabilities",
+        "api-reference/confirmation-gate"
       ]
     },
     {
       "group": "Guides",
       "icon": "compass",
       "pages": [
-        { "name": "Quick Start", "page": "quick-start", "icon": "zap" },
-        { "name": "Configuration", "page": "guides/configuration", "icon": "settings" },
-        { "name": "Running the Daemon", "page": "guides/running-daemon", "icon": "server" },
-        { "name": "Using igrisctl", "page": "guides/using-igrisctl", "icon": "terminal" },
-        { "name": "Building from Source", "page": "guides/building-from-source", "icon": "hammer" },
-        { "name": "Writing Policies", "page": "guides/writing-policies", "icon": "file-pen" },
-        { "name": "Mock Agent", "page": "guides/mock-agent", "icon": "bot" }
+        "quick-start",
+        "guides/configuration",
+        "guides/running-daemon",
+        "guides/using-igrisctl",
+        "guides/building-from-source",
+        "guides/writing-policies",
+        "guides/mock-agent"
       ]
     },
     {
       "group": "Development",
       "icon": "wrench",
       "pages": [
-        { "name": "Setup", "page": "development/setup", "icon": "tool" },
-        { "name": "Testing", "page": "development/testing", "icon": "test-tube" },
-        { "name": "Contributing", "page": "development/contributing", "icon": "github" },
-        { "name": "Code Style", "page": "development/code-style", "icon": "brackets" },
-        { "name": "Roadmap", "page": "development/roadmap", "icon": "map" }
+        "development/setup",
+        "development/testing",
+        "development/contributing",
+        "development/code-style",
+        "development/roadmap"
       ]
     },
     {
       "group": "Architecture Decision Records",
       "icon": "git-branch",
       "pages": [
-        { "name": "ADR Overview", "page": "adr/overview", "icon": "file-text" },
-        { "name": "0001 - Record Architecture Decisions", "page": "adr/0001-record-architecture-decisions", "icon": "book" },
-        { "name": "0002 - Use Rust for Core Services", "page": "adr/0002-use-rust-for-core-services", "icon": "rust" },
-        { "name": "0003 - Use Python for Agent Layer", "page": "adr/0003-use-python-for-agent-layer", "icon": "python" },
-        { "name": "0004 - WSL2 as Development Environment", "page": "adr/0004-wsl2-as-development-environment", "icon": "window" },
-        { "name": "0005 - Privilege Separation and Default Deny", "page": "adr/0005-privilege-separation-and-default-deny", "icon": "shield" },
-        { "name": "0006 - Unix Socket IPC Boundary", "page": "adr/0006-unix-socket-ipc-boundary", "icon": "plug" },
-        { "name": "0007 - Filesystem Boundary and Read-Only Tools", "page": "adr/0007-filesystem-boundary-and-read-only-tools", "icon": "folder" },
-        { "name": "0008 - Process Observation and Proc Boundary", "page": "adr/0008-process-observation-and-proc-boundary", "icon": "activity" },
-        { "name": "0009 - Agent Tool Calling and Sandboxing", "page": "adr/0009-agent-tool-calling-and-sandboxing", "icon": "sandbox" }
+        "adr/overview",
+        "adr/0001-record-architecture-decisions",
+        "adr/0002-use-rust-for-core-services",
+        "adr/0003-use-python-for-agent-layer",
+        "adr/0004-wsl2-as-development-environment",
+        "adr/0005-privilege-separation-and-default-deny",
+        "adr/0006-unix-socket-ipc-boundary",
+        "adr/0007-filesystem-boundary-and-read-only-tools",
+        "adr/0008-process-observation-and-proc-boundary",
+        "adr/0009-agent-tool-calling-and-sandboxing"
       ]
     }
   ],
